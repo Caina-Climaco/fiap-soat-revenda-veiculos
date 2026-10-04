@@ -1,9 +1,11 @@
 # Entrega continua (docs/08-ci-cd-infra.md, secao 3.3; ADR-006 e ADR-010).
-# Roda SOMENTE no runner self-hosted Windows do PC do autor (labels self-hosted,
-# Windows, kind-local) e SOMENTE em push na main (PR mergeado) ou disparo manual.
-# Nenhum workflow com runner self-hosted reage a pull_request.
-# Passos em Git Bash (shell: bash). MSYS_NO_PATHCONV evita que o Git Bash converta
-# argumentos como /app ou jsonpath em caminhos do Windows.
+# Roda SOMENTE no runner self-hosted do PC do autor, um container Linux no Docker
+# Desktop (infra/runner; labels self-hosted, Linux, kind-local), e SOMENTE em push na
+# main (PR mergeado) ou disparo manual. Nenhum workflow self-hosted reage a pull_request.
+# O container esta na rede docker "kind": fala com o cluster pelo nome do no
+# (revenda-control-plane), com o Docker do host pelo socket montado e grava o state do
+# Terraform em /revenda-state (bind mount de %USERPROFILE%\.revenda, o mesmo arquivo
+# usado pelo scripts/windows/04-subir-ambiente.ps1).
 name: CD
 
 on:
@@ -31,17 +33,19 @@ defaults:
 jobs:
   deploy:
     name: deploy
-    runs-on: [self-hosted, Windows, kind-local]
+    runs-on: [self-hosted, Linux, kind-local]
     environment: local
     timeout-minutes: 60
     env:
-      MSYS_NO_PATHCONV: "1"
-      MSYS2_ARG_CONV_EXCL: "*"
       KIND_CLUSTER: revenda
       NS_APP: revenda
       NS_ID: identidade
-      E2E_API_URL: http://localhost:8080
-      E2E_KEYCLOAK_URL: http://localhost:8180
+      # NodePorts pelo nome do no na rede "kind" (localhost:8080/8180 sao do host Windows).
+      # O issuer dos tokens continua http://localhost:8180/realms/revenda (KC_HOSTNAME fixo).
+      E2E_API_URL: http://revenda-control-plane:30080
+      E2E_KEYCLOAK_URL: http://revenda-control-plane:30180
+      STATE_DIR: /revenda-state
+      TF_DATA_DIR: /home/runner/persist/terraform-data
       TF_IN_AUTOMATION: "1"
       TF_INPUT: "0"
     steps:
@@ -57,25 +61,23 @@ jobs:
           REF_SOLICITADA: ${{ inputs.ref }}
         run: |
           set -euo pipefail
-          # cygpath -m => C:/Users/fulano/... (aceito pelo bash e pelos executaveis nativos)
-          winpath() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
           SHA="$(git rev-parse HEAD)"
-          PERFIL="$(winpath "${USERPROFILE:-$HOME}")"
-          STATE_DIR="${PERFIL}/.revenda"
-          WORK_TMP="$(winpath "$RUNNER_TEMP")/revenda-cd"
-          mkdir -p "$STATE_DIR" "$WORK_TMP"
-          chmod 700 "$STATE_DIR" 2>/dev/null || true
+          WORK_TMP="${RUNNER_TEMP}/revenda-cd"
+          KCFG="${HOME}/.kube/config"
+          mkdir -p "$WORK_TMP" "$TF_DATA_DIR" "$(dirname "$KCFG")"
+          if [ ! -d "$STATE_DIR" ] || [ ! -w "$STATE_DIR" ]; then
+            echo "::error::${STATE_DIR} ausente ou sem escrita: o container do runner precisa do bind mount de %USERPROFILE%\\.revenda (scripts/windows/03-instalar-runner.ps1)"
+            exit 1
+          fi
           {
             echo "SHA=${SHA}"
             echo "IMAGEM=revenda-api:${SHA}"
-            echo "STATE_DIR=${STATE_DIR}"
-            echo "TF_DATA_DIR=${STATE_DIR}/terraform-data"
-            echo "KUBECONFIG=${PERFIL}/.kube/config"
-            echo "TF_VAR_kubeconfig_path=${PERFIL}/.kube/config"
+            echo "KUBECONFIG=${KCFG}"
+            echo "TF_VAR_kubeconfig_path=${KCFG}"
             echo "WORK_TMP=${WORK_TMP}"
           } >> "$GITHUB_ENV"
           echo "Implantando ${SHA} (evento: ${GITHUB_EVENT_NAME}, ref solicitada: '${REF_SOLICITADA:-}')"
-          for ferramenta in docker kind kubectl terraform curl base64 sed; do
+          for ferramenta in docker kind kubectl terraform python3 curl jq base64 sed; do
             command -v "$ferramenta" >/dev/null 2>&1 || { echo "::error::Ferramenta ausente no PATH do runner: $ferramenta"; exit 1; }
           done
           docker version --format 'docker {{.Server.Version}}'
@@ -88,13 +90,15 @@ jobs:
       - name: Cluster kind (cria se nao existir)
         run: |
           set -euo pipefail
-          clusters="$(kind get clusters 2>/dev/null | tr -d '\r' || true)"
+          clusters="$(kind get clusters 2>/dev/null || true)"
           if printf '%s\n' "$clusters" | grep -qx "$KIND_CLUSTER"; then
             echo "Cluster kind '$KIND_CLUSTER' ja existe."
           else
             kind create cluster --config infra/kind/cluster.yaml --wait 120s
           fi
-          kind export kubeconfig --name "$KIND_CLUSTER"
+          # --internal: API server em https://revenda-control-plane:6443 (rede "kind"),
+          # alcancavel de dentro do container do runner
+          kind export kubeconfig --internal --name "$KIND_CLUSTER"
           kubectl config current-context
           kubectl get nodes -o wide
 
@@ -103,7 +107,8 @@ jobs:
         run: |
           set -euo pipefail
           terraform init -input=false -backend-config="path=${STATE_DIR}/terraform.tfstate"
-          # Os providers kubernetes/helm usam o contexto kind-revenda do KUBECONFIG
+          # Mesmo state do Windows (/revenda-state); TF_DATA_DIR proprio (providers linux)
+          # Os providers kubernetes/helm usam o contexto kind-revenda do KUBECONFIG interno
           terraform apply -input=false -auto-approve
 
       - name: Build da imagem ${{ env.IMAGEM }}
@@ -190,16 +195,17 @@ jobs:
           esperar "${E2E_KEYCLOAK_URL}/realms/revenda/.well-known/openid-configuration" 300
 
       - name: Python 3.12 para o e2e
-        uses: actions/setup-python@v7
-        with:
-          python-version: "3.12"
+        # python3 da imagem do runner (Ubuntu 24.04); sem actions/setup-python
+        run: |
+          set -euo pipefail
+          python3 --version
+          python3 -c 'import sys; assert sys.version_info[:2] >= (3, 12), sys.version'
 
       - name: Dependencias do e2e (pytest + httpx, isoladas do pacote revenda)
         run: |
           set -euo pipefail
-          python -m venv "${WORK_TMP}/e2e-venv"
-          VENV_PY="${WORK_TMP}/e2e-venv/Scripts/python.exe"
-          [ -x "$VENV_PY" ] || VENV_PY="${WORK_TMP}/e2e-venv/bin/python"
+          python3 -m venv "${WORK_TMP}/e2e-venv"
+          VENV_PY="${WORK_TMP}/e2e-venv/bin/python"
           "$VENV_PY" -m pip install --disable-pip-version-check --quiet -r tests/e2e/requirements.txt
           "$VENV_PY" -m pytest --version
           echo "VENV_PY=${VENV_PY}" >> "$GITHUB_ENV"
@@ -257,8 +263,9 @@ jobs:
               attr() { printf '%s' "$linha" | sed -n "s/.* $1=\"\([^\"]*\)\".*/\1/p"; }
               echo "| Testes e2e | $(attr tests) total, $(attr failures) falhas, $(attr errors) erros, $(attr skipped) pulados |"
             fi
-            echo "| API | ${E2E_API_URL} (Swagger em ${E2E_API_URL}/docs) |"
-            echo "| Keycloak | ${E2E_KEYCLOAK_URL} |"
+            echo "| API (no PC) | http://localhost:8080 (Swagger em http://localhost:8080/docs) |"
+            echo "| Keycloak (no PC) | http://localhost:8180 |"
+            echo "| Testado pelo runner em | ${E2E_API_URL} e ${E2E_KEYCLOAK_URL} (rede kind) |"
             echo ""
             echo "Rollback: Actions > CD > Run workflow com \`ref\` = SHA anterior (docs/08-ci-cd-infra.md, secao 6)."
           } >> "$GITHUB_STEP_SUMMARY"

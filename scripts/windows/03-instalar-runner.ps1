@@ -1,30 +1,29 @@
-# Instala e registra o runner self-hosted do GitHub Actions (CD local, ADR-006).
+# Instala o runner self-hosted do GitHub Actions como CONTAINER LINUX no Docker Desktop
+# (ADR-006). No Windows o Smart App Control bloqueia as DLLs do runner nativo.
 #
-# Uso (PowerShell normal, SEM administrador, logado como o usuario que usa o Docker Desktop):
-#   powershell -ExecutionPolicy Bypass -File .\scripts\windows\03-instalar-runner.ps1 [-Reconfigurar]
+# Uso (PowerShell normal, sem administrador):
+#   powershell -ExecutionPolicy Bypass -File .\scripts\windows\03-instalar-runner.ps1
+#   powershell -ExecutionPolicy Bypass -File .\scripts\windows\03-instalar-runner.ps1 -Remover
 #
-# O que faz:
-#   1. confere gh (autenticado), git/Git Bash, docker, kind, kubectl e terraform;
-#   2. baixa a versao mais recente do runner (win-x64) de github.com/actions/runner/releases
-#      e confere o SHA-256 publicado nas notas do release (e o digest do asset, se houver);
-#   3. registra o runner no repositorio com as labels self-hosted, Windows, X64 e kind-local,
-#      nome <computador>-kind, diretorio de trabalho _work (token de registro via gh api);
-#   4. cria uma Tarefa Agendada no logon do usuario atual que executa run.cmd, por um wrapper
-#      que poe o Git Bash no inicio do PATH (sem servico e
-#      sem admin: o runner roda como o usuario logado e enxerga o Docker Desktop e
-#      %USERPROFILE%\.kube\config) e a inicia imediatamente;
-#   5. espera o runner aparecer "online" no GitHub.
-# Sem -Reconfigurar, um runner ja configurado no diretorio e mantido (ele se atualiza
-# sozinho); so a tarefa agendada e recriada e iniciada.
-# Diretorio do runner: C:\Projetos\fiap\runner-revenda (FORA do repositorio).
-# Log: .setup\relatorio-runner.txt (pasta ignorada pelo git).
-# Arquivo somente ASCII (compatibilidade com Windows PowerShell 5.1).
+# Instalacao:
+#   1. confere gh (autenticado), Docker Desktop, cluster kind "revenda" e rede docker "kind";
+#   2. docker build -t revenda-runner:<versao> infra/runner (versao = ARG RUNNER_VERSION);
+#   3. remove o container antigo (o volume com a configuracao e mantido);
+#   4. obtem o token de registro (gh api) e faz docker run na rede "kind", com o socket do
+#      Docker, o volume revenda-runner-persist (registro e TF_DATA_DIR) e o bind mount de
+#      %USERPROFILE%\.revenda em /revenda-state (MESMO state do 04-subir-ambiente.ps1);
+#   5. espera o runner aparecer online no GitHub (labels self-hosted, Linux, X64, kind-local).
+#   O token so e passado por variavel de ambiente: nunca aparece na tela nem no log.
+#   Se o volume ja tiver uma configuracao valida, o container a reaproveita.
+# -Remover: desregistra o runner (token de remocao + config.sh remove num container
+#   temporario com o mesmo volume), remove o container e o volume.
+# Log: .setup\relatorio-runner.txt. Arquivo somente ASCII (Windows PowerShell 5.1).
 param(
     [string]$Repositorio = "Caina-Climaco/fiap-soat-revenda-veiculos",
-    [string]$Diretorio = "C:\Projetos\fiap\runner-revenda",
+    [string]$Container = "revenda-runner",
+    [string]$Volume = "revenda-runner-persist",
     [string]$Labels = "kind-local",
-    [string]$NomeTarefa = "GitHub Actions Runner - revenda",
-    [switch]$Reconfigurar
+    [switch]$Remover
 )
 
 $ErrorActionPreference = "Continue"
@@ -32,7 +31,6 @@ $ErrorActionPreference = "Continue"
 # (kind, terraform) so aparecem em janelas novas do PowerShell.
 $env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User") + ";" + $env:Path
 $ProgressPreference = "SilentlyContinue"
-[Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $raiz = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $log = Join-Path $raiz ".setup\relatorio-runner.txt"
 New-Item -ItemType Directory -Force -Path (Split-Path $log) | Out-Null
@@ -40,22 +38,18 @@ Start-Transcript -Path $log -Force | Out-Null
 
 # Executa um comando nativo mostrando stdout e stderr (inclusive no transcript, que no
 # PowerShell 5.1 so registra o que passa pelo pipeline) e devolve o codigo de saida.
-# -Mascarar: valores que nunca devem aparecer no log (ex.: token de registro).
 function Invocar {
-    param([string]$Exe, [string[]]$Argumentos, [string[]]$Mascarar = @())
-    $texto = "$Exe $($Argumentos -join ' ')"
-    foreach ($m in $Mascarar) { if ($m) { $texto = $texto.Replace($m, "***") } }
-    Write-Host ">> $texto"
+    param([string]$Exe, [string[]]$Argumentos)
+    Write-Host ">> $Exe $($Argumentos -join ' ')"
     $global:LASTEXITCODE = 0
     & $Exe @Argumentos 2>&1 | ForEach-Object {
-        $linha = if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" }
-        foreach ($m in $Mascarar) { if ($m) { $linha = $linha.Replace($m, "***") } }
-        $linha
+        if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { "$_" }
     } | Out-Host
     return $LASTEXITCODE
 }
 
 function Falhar([string]$motivo) {
+    Remove-Item Env:\RUNNER_TOKEN -ErrorAction SilentlyContinue
     Write-Host ""
     Write-Host "ERRO: $motivo"
     Write-Host "Log: $log"
@@ -63,179 +57,161 @@ function Falhar([string]$motivo) {
     exit 1
 }
 
+# Existe container/volume/rede com esse nome? (sem poluir a tela com erros)
+function Existe([string]$tipo, [string]$nome) {
+    & docker $tipo inspect $nome *> $null
+    return ($LASTEXITCODE -eq 0)
+}
+
+function RunnerNoGitHub([string]$nome) {
+    $json = (& gh api "repos/$Repositorio/actions/runners?per_page=100") -join "`n"
+    if ($LASTEXITCODE -ne 0 -or -not $json) { return $null }
+    return (($json | ConvertFrom-Json).runners | Where-Object { $_.name -eq $nome } | Select-Object -First 1)
+}
+
 Write-Host "03-instalar-runner.ps1 - $(Get-Date -Format s)"
-Write-Host "Repositorio: $Repositorio | Diretorio: $Diretorio | Labels: $Labels"
+$nomeRunner = "$($env:COMPUTERNAME.ToLowerInvariant())-kind"
+$dockerfileDir = Join-Path $raiz "infra\runner"
+$versao = ""
+$linhaVersao = Select-String -Path (Join-Path $dockerfileDir "Dockerfile") -Pattern '^ARG RUNNER_VERSION=(\S+)' | Select-Object -First 1
+if ($linhaVersao) { $versao = $linhaVersao.Matches[0].Groups[1].Value }
+if (-not $versao) { Falhar "ARG RUNNER_VERSION nao encontrado em infra\runner\Dockerfile." }
+$imagem = "revenda-runner:$versao"
+Write-Host "Repositorio: $Repositorio | Runner: $nomeRunner | Imagem: $imagem | Container: $Container"
 
 # ------------------------------------------------------------------ pre-requisitos
-$admin = ([Security.Principal.WindowsPrincipal][Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([Security.Principal.WindowsBuiltInRole]::Administrator)
-if ($admin) {
-    Write-Host "AVISO: sessao com privilegio de administrador. Prefira um PowerShell comum: a tarefa"
-    Write-Host "       agendada roda com privilegio limitado de qualquer forma (docs/08, secao 5)."
-}
-foreach ($f in @("gh", "git", "docker", "kind", "kubectl", "terraform")) {
+foreach ($f in @("gh", "docker")) {
     if (-not (Get-Command $f -ErrorAction SilentlyContinue)) {
         Falhar "'$f' nao encontrado no PATH (rode scripts\windows\01-instalar-ferramentas.ps1)."
     }
 }
 if ((Invocar "gh" @("auth", "status")) -ne 0) { Falhar "gh nao autenticado (gh auth login)." }
-if ((Invocar "docker" @("version", "--format", "docker {{.Server.Version}}")) -ne 0) {
-    Falhar "Docker Desktop nao responde para este usuario. Inicie o Docker Desktop e tente de novo."
+if ((Invocar "docker" @("version", "--format", "docker {{.Server.Version}} ({{.Server.Os}})")) -ne 0) {
+    Falhar "Docker Desktop nao responde. Inicie o Docker Desktop e tente de novo."
 }
 
-# Git Bash: os passos do cd.yml usam `shell: bash`. No Windows o runner resolve `bash` pelo
-# PATH do processo; o instalador do Git so poe Git\cmd no PATH, e o bash.exe do WSL
-# (C:\Windows\System32) viria antes. Por isso a tarefa inicia o runner por um wrapper
-# (iniciar-runner.cmd) que coloca Git\bin no inicio do PATH.
-$gitExec = (& git --exec-path 2>$null)
-if ($LASTEXITCODE -ne 0 -or -not $gitExec) { Falhar "git --exec-path falhou." }
-$gitRaiz = $gitExec -replace '/', '\'
-$gitRaiz = $gitRaiz -replace '\\(mingw64|clangarm64|mingw32)\\libexec\\git-core\\?$', ''
-$gitBin = Join-Path $gitRaiz "bin"
-if (-not (Test-Path (Join-Path $gitBin "bash.exe"))) {
-    Falhar "Git Bash nao encontrado em $gitBin (instale o Git for Windows)."
-}
-Write-Host "Git Bash: $gitBin\bash.exe"
-
-# ------------------------------------------------------------------ runner ja configurado?
-$configurado = Test-Path (Join-Path $Diretorio ".runner")
-
-# Para a tarefa e qualquer processo do runner deste diretorio (antes de reconfigurar/atualizar)
-$tarefa = Get-ScheduledTask -TaskName $NomeTarefa -ErrorAction SilentlyContinue
-if ($tarefa) {
-    Write-Host "Parando a tarefa agendada existente '$NomeTarefa'"
-    Stop-ScheduledTask -TaskName $NomeTarefa -ErrorAction SilentlyContinue
-}
-Get-Process -Name "Runner.Listener", "Runner.Worker" -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -and $_.Path.StartsWith($Diretorio, [StringComparison]::OrdinalIgnoreCase) } |
-    ForEach-Object { Write-Host "Encerrando $($_.ProcessName) (PID $($_.Id))"; Stop-Process -Id $_.Id -Force -ErrorAction SilentlyContinue }
-
-if ($configurado -and $Reconfigurar) {
-    Write-Host "Removendo a configuracao atual do runner (-Reconfigurar)"
-    $tokenRemocao = (& gh api -X POST "repos/$Repositorio/actions/runners/remove-token" --jq .token)
-    if ($LASTEXITCODE -ne 0 -or -not $tokenRemocao) { Falhar "nao foi possivel obter o token de remocao (gh api)." }
-    Push-Location $Diretorio
-    $codigo = Invocar (Join-Path $Diretorio "config.cmd") @("remove", "--token", $tokenRemocao) -Mascarar @($tokenRemocao)
-    Pop-Location
-    if ($codigo -ne 0) { Falhar "config.cmd remove falhou (codigo $codigo)." }
-    $configurado = $false
-}
-
-if (-not $configurado) {
-    # -------------------------------------------------------------- download verificado
-    Write-Host "Consultando o release mais recente de actions/runner"
-    $json = (& gh api "repos/actions/runner/releases/latest") -join "`n"
-    if ($LASTEXITCODE -ne 0 -or -not $json) { Falhar "gh api repos/actions/runner/releases/latest falhou." }
-    $release = $json | ConvertFrom-Json
-    $versao = $release.tag_name.TrimStart("v")
-    $arquivo = "actions-runner-win-x64-$versao.zip"
-    $asset = $release.assets | Where-Object { $_.name -eq $arquivo } | Select-Object -First 1
-    if (-not $asset) { Falhar "asset $arquivo nao encontrado no release $($release.tag_name)." }
-
-    $m = [regex]::Match([string]$release.body, '<!-- BEGIN SHA win-x64 -->\s*([0-9a-fA-F]{64})\s*<!-- END SHA win-x64 -->')
-    if (-not $m.Success) { Falhar "SHA-256 do pacote win-x64 nao encontrado nas notas do release $($release.tag_name)." }
-    $shaPublicado = $m.Groups[1].Value.ToLowerInvariant()
-    if ($asset.digest -and $asset.digest -like "sha256:*") {
-        $shaAsset = $asset.digest.Substring(7).ToLowerInvariant()
-        if ($shaAsset -ne $shaPublicado) { Falhar "SHA-256 das notas ($shaPublicado) difere do digest do asset ($shaAsset)." }
+# ------------------------------------------------------------------ remocao
+if ($Remover) {
+    Write-Host "Removendo o runner '$nomeRunner'"
+    if (Existe "container" $Container) {
+        $null = Invocar "docker" @("stop", "--time", "30", $Container)
     }
-    Write-Host "Versao: $versao | SHA-256 publicado: $shaPublicado"
-
-    New-Item -ItemType Directory -Force -Path $Diretorio | Out-Null
-    $zip = Join-Path $env:TEMP $arquivo
-    Write-Host "Baixando $($asset.browser_download_url)"
-    try {
-        Invoke-WebRequest -Uri $asset.browser_download_url -OutFile $zip -UseBasicParsing
-    } catch {
-        Falhar "download falhou: $($_.Exception.Message)"
+    $removidoLocal = $false
+    if ((Existe "volume" $Volume) -and (Existe "image" $imagem)) {
+        $tokenRemocao = (& gh api -X POST "repos/$Repositorio/actions/runners/remove-token" --jq .token)
+        if ($LASTEXITCODE -eq 0 -and $tokenRemocao) {
+            # Container temporario com o mesmo volume: restaura a configuracao e roda
+            # config.sh remove. O token vai por variavel de ambiente (-e sem valor).
+            $env:RUNNER_TOKEN = $tokenRemocao
+            # Sem aspas duplas no script: o PowerShell 5.1 as corrompe ao chamar executaveis.
+            $script = 'cd /home/runner && for f in .runner .credentials .credentials_rsaparams; do if [ -f persist/$f ]; then cp -f persist/$f .; fi; done; [ -f .runner ] || { echo sem configuracao no volume; exit 3; }; ./config.sh remove --token $RUNNER_TOKEN'
+            $codigo = Invocar "docker" @("run", "--rm", "-e", "RUNNER_TOKEN", "-v", "${Volume}:/home/runner/persist", "--entrypoint", "bash", $imagem, "-c", $script)
+            Remove-Item Env:\RUNNER_TOKEN -ErrorAction SilentlyContinue
+            $removidoLocal = ($codigo -eq 0)
+            if (-not $removidoLocal) { Write-Host "AVISO: config.sh remove falhou (codigo $codigo)." }
+        } else {
+            Write-Host "AVISO: nao foi possivel obter o token de remocao."
+        }
     }
-    $shaLocal = (Get-FileHash -Path $zip -Algorithm SHA256).Hash.ToLowerInvariant()
-    if ($shaLocal -ne $shaPublicado) {
-        Remove-Item $zip -Force -ErrorAction SilentlyContinue
-        Falhar "SHA-256 do arquivo baixado ($shaLocal) NAO confere com o publicado ($shaPublicado)."
+    if (-not $removidoLocal) {
+        # Garantia: apaga o registro pela API, se ainda existir
+        $r = RunnerNoGitHub $nomeRunner
+        if ($r) {
+            Write-Host "Removendo o registro '$nomeRunner' (id $($r.id)) pela API"
+            $null = Invocar "gh" @("api", "-X", "DELETE", "repos/$Repositorio/actions/runners/$($r.id)")
+        }
     }
-    Write-Host "SHA-256 conferido."
-    try {
-        Expand-Archive -Path $zip -DestinationPath $Diretorio -Force
-    } catch {
-        Falhar "falha ao extrair ${zip}: $($_.Exception.Message)"
-    }
-    Remove-Item $zip -Force -ErrorAction SilentlyContinue
-
-    # -------------------------------------------------------------- registro no repositorio
-    $token = (& gh api -X POST "repos/$Repositorio/actions/runners/registration-token" --jq .token)
-    if ($LASTEXITCODE -ne 0 -or -not $token) { Falhar "nao foi possivel obter o token de registro (escopo repo do gh?)." }
-    $nome = "$($env:COMPUTERNAME.ToLowerInvariant())-kind"
-    Push-Location $Diretorio
-    $codigo = Invocar (Join-Path $Diretorio "config.cmd") @(
-        "--unattended",
-        "--url", "https://github.com/$Repositorio",
-        "--token", $token,
-        "--labels", $Labels,
-        "--name", $nome,
-        "--work", "_work",
-        "--replace"
-    ) -Mascarar @($token)
-    Pop-Location
-    if ($codigo -ne 0) { Falhar "config.cmd falhou (codigo $codigo)." }
-} else {
-    Write-Host "Runner ja configurado em $Diretorio (use -Reconfigurar para registrar de novo)."
+    if (Existe "container" $Container) { $null = Invocar "docker" @("rm", "-f", $Container) }
+    if (Existe "volume" $Volume) { $null = Invocar "docker" @("volume", "rm", $Volume) }
+    if (RunnerNoGitHub $nomeRunner) { Falhar "o runner '$nomeRunner' ainda aparece no GitHub (Settings > Actions > Runners)." }
+    Write-Host "Runner removido. A imagem $imagem continua no Docker local (docker image rm $imagem)."
+    Stop-Transcript | Out-Null
+    exit 0
 }
 
-# ------------------------------------------------------------------ wrapper de inicio
-# Git\bin primeiro no PATH (bash do Git Bash, nao o do WSL) e entao o run.cmd oficial.
-$wrapper = Join-Path $Diretorio "iniciar-runner.cmd"
-$conteudo = @(
-    "@echo off",
-    "rem Gerado por scripts\windows\03-instalar-runner.ps1",
-    "set ""PATH=$gitBin;%PATH%""",
-    "cd /d ""%~dp0""",
-    "call ""%~dp0run.cmd"""
+# ------------------------------------------------------------------ pre-requisitos do cluster
+if (-not (Existe "container" "revenda-control-plane")) {
+    Falhar "cluster kind 'revenda' nao encontrado (container revenda-control-plane). Rode scripts\windows\04-subir-ambiente.ps1 antes."
+}
+if (-not (Existe "network" "kind")) {
+    Falhar "rede docker 'kind' nao encontrada (ela e criada pelo kind create cluster)."
+}
+$stateDir = Join-Path $env:USERPROFILE ".revenda"
+New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
+if (-not (Test-Path (Join-Path $stateDir "terraform.tfstate"))) {
+    Write-Host "AVISO: $stateDir\terraform.tfstate nao existe; o primeiro CD vai criar um state novo."
+}
+
+# Runner Windows da tentativa anterior (bloqueado pelo Smart App Control)
+$tarefaAntiga = Get-ScheduledTask -TaskName "GitHub Actions Runner - revenda" -ErrorAction SilentlyContinue
+if ($tarefaAntiga) {
+    Write-Host "AVISO: existe a tarefa agendada antiga 'GitHub Actions Runner - revenda' (runner Windows)."
+    Write-Host "       Ela nao e mais usada: Unregister-ScheduledTask -TaskName 'GitHub Actions Runner - revenda'"
+}
+if (Test-Path "C:\Projetos\fiap\runner-revenda") {
+    Write-Host "AVISO: C:\Projetos\fiap\runner-revenda (runner Windows parcial) nao e mais usado e pode ser apagado."
+}
+
+# ------------------------------------------------------------------ imagem
+$codigo = Invocar "docker" @("build", "--pull", "-t", $imagem, $dockerfileDir)
+if ($codigo -ne 0) { Falhar "docker build da imagem do runner falhou (codigo $codigo)." }
+$null = Invocar "docker" @("run", "--rm", "--entrypoint", "bash", $imagem, "-c",
+    "kind version && kubectl version --client && terraform version && python3 --version && docker --version && jq --version && git --version")
+
+# ------------------------------------------------------------------ container
+if (Existe "container" $Container) {
+    Write-Host "Removendo o container antigo $Container (o volume $Volume e mantido)"
+    if ((Invocar "docker" @("rm", "-f", $Container)) -ne 0) { Falhar "docker rm -f $Container falhou." }
+}
+
+$token = (& gh api -X POST "repos/$Repositorio/actions/runners/registration-token" --jq .token)
+if ($LASTEXITCODE -ne 0 -or -not $token) { Falhar "nao foi possivel obter o token de registro (escopo repo do gh?)." }
+
+# -e NOME sem valor: o docker le o valor do ambiente deste processo (token fora da linha de comando)
+$env:RUNNER_TOKEN = $token
+$env:RUNNER_REPO_URL = "https://github.com/$Repositorio"
+$env:RUNNER_NAME = $nomeRunner
+$env:RUNNER_LABELS = $Labels
+$codigo = Invocar "docker" @(
+    "run", "-d",
+    "--name", $Container,
+    "--restart", "unless-stopped",
+    "--network", "kind",
+    "-v", "/var/run/docker.sock:/var/run/docker.sock",
+    "-v", "${Volume}:/home/runner/persist",
+    "--mount", "type=bind,source=$stateDir,target=/revenda-state",
+    "-e", "RUNNER_TOKEN", "-e", "RUNNER_REPO_URL", "-e", "RUNNER_NAME", "-e", "RUNNER_LABELS",
+    $imagem
 )
-Set-Content -Path $wrapper -Value $conteudo -Encoding ascii
-Write-Host "Wrapper: $wrapper (PATH comeca por $gitBin)"
-
-# ------------------------------------------------------------------ tarefa agendada
-$usuario = "$env:USERDOMAIN\$env:USERNAME"
-if (-not (Test-Path (Join-Path $Diretorio "run.cmd"))) { Falhar "run.cmd nao encontrado em $Diretorio." }
-try {
-    $acao = New-ScheduledTaskAction -Execute $wrapper -WorkingDirectory $Diretorio
-    $gatilho = New-ScheduledTaskTrigger -AtLogOn -User $usuario
-    $principal = New-ScheduledTaskPrincipal -UserId $usuario -LogonType Interactive -RunLevel Limited
-    $config = New-ScheduledTaskSettingsSet -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries `
-        -StartWhenAvailable -MultipleInstances IgnoreNew -ExecutionTimeLimit ([TimeSpan]::Zero) `
-        -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
-    Register-ScheduledTask -TaskName $NomeTarefa -Action $acao -Trigger $gatilho -Principal $principal `
-        -Settings $config -Description "Runner self-hosted (label kind-local) do repositorio $Repositorio. Criado por scripts\windows\03-instalar-runner.ps1." `
-        -Force -ErrorAction Stop | Out-Null
-    Write-Host "Tarefa agendada '$NomeTarefa' registrada (logon de $usuario, privilegio limitado)."
-    Start-ScheduledTask -TaskName $NomeTarefa -ErrorAction Stop
-    Write-Host "Tarefa iniciada: uma janela de console do runner fica aberta (nao feche)."
-} catch {
-    Falhar "falha ao registrar/iniciar a tarefa agendada: $($_.Exception.Message)"
-}
+Remove-Item Env:\RUNNER_TOKEN -ErrorAction SilentlyContinue
+$token = $null
+if ($codigo -ne 0) { Falhar "docker run do runner falhou (codigo $codigo)." }
 
 # ------------------------------------------------------------------ confirmacao
-$nomeRunner = "$($env:COMPUTERNAME.ToLowerInvariant())-kind"
 $status = ""
-for ($i = 1; $i -le 24; $i++) {
+for ($i = 1; $i -le 36; $i++) {
     Start-Sleep -Seconds 5
-    $json = (& gh api "repos/$Repositorio/actions/runners") -join "`n"
-    if ($LASTEXITCODE -ne 0 -or -not $json) { continue }
-    $r = ($json | ConvertFrom-Json).runners | Where-Object { $_.name -eq $nomeRunner } | Select-Object -First 1
+    $r = RunnerNoGitHub $nomeRunner
     if ($r) {
         $status = "$($r.status) [$((@($r.labels | ForEach-Object { $_.name })) -join ', ')]"
         if ($r.status -eq "online") { break }
     }
+    $estado = (& docker inspect -f "{{.State.Status}}" $Container 2>$null)
+    if ($estado -ne "running") { Write-Host "Container $Container em estado '$estado'"; break }
 }
+$null = Invocar "docker" @("logs", "--tail", "30", $Container)
 if ($status -like "online*") {
     Write-Host "Runner '$nomeRunner' ONLINE: $status"
 } else {
     Write-Host "AVISO: runner '$nomeRunner' ainda nao aparece online (status: '$status')."
-    Write-Host "       Veja a janela do runner e $Diretorio\_diag. Settings > Actions > Runners no GitHub."
+    Write-Host "       Veja: docker logs -f $Container   e   Settings > Actions > Runners no GitHub."
 }
 Write-Host ""
-Write-Host "Proximos passos: scripts\windows\04-subir-ambiente.ps1 (opcional; o CD tambem aplica o"
-Write-Host "Terraform) e um merge na main ou: gh workflow run cd.yml -R $Repositorio"
+Write-Host "Teste de acesso ao cluster a partir do container:"
+$null = Invocar "docker" @("exec", $Container, "bash", "-c",
+    "kind export kubeconfig --internal --name revenda >/dev/null && kubectl get nodes -o wide && curl -fsS -o /dev/null -w 'keycloak %{http_code}\n' http://revenda-control-plane:30180/realms/revenda/.well-known/openid-configuration")
+Write-Host ""
+Write-Host "Proximo passo: merge na main ou  gh workflow run cd.yml -R $Repositorio"
 Write-Host "Log: $log"
 Stop-Transcript | Out-Null
 exit 0

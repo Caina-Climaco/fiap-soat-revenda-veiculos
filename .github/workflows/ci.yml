@@ -244,6 +244,21 @@ jobs:
             || { echo "::error file=${arquivo}::imagem do no deve ser fixada por digest"; exit 1; }
           echo "Config do kind OK"
 
+      - name: Runner em container (hadolint no Dockerfile, shellcheck no entrypoint)
+        env:
+          HADOLINT_VERSION: v2.15.1
+          HADOLINT_SHA256: c7187db94eeeeca956519a6af171adc31453941a1e777961f6e680f697c8c507
+        run: |
+          set -euo pipefail
+          shellcheck --version | head -n 2
+          shellcheck infra/runner/entrypoint.sh
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/hadolint" \
+            "https://github.com/hadolint/hadolint/releases/download/${HADOLINT_VERSION}/hadolint-linux-x86_64"
+          echo "${HADOLINT_SHA256}  ${RUNNER_TEMP}/hadolint" | sha256sum -c -
+          chmod +x "${RUNNER_TEMP}/hadolint"
+          "${RUNNER_TEMP}/hadolint" infra/runner/Dockerfile
+          echo "Runner OK"
+
       - name: Realm do Keycloak (JSON valido e contrato minimo)
         run: |
           set -euo pipefail

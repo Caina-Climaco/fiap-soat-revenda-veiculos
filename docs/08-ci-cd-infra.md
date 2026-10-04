@@ -50,7 +50,7 @@ Fronteira de responsabilidade: a **CLI kind** cria o cluster; o **Terraform** cu
 ### 1.3 State: onde fica e por quê
 
 - Backend `local`, com caminho informado no `terraform init` (configuração parcial): `-backend-config="path=$USERPROFILE/.revenda/terraform.tfstate"`. `TF_DATA_DIR` também aponta para fora do repositório.
-- O diretório fica no perfil do usuário do runner, com permissão `0700`.
+- O diretório fica no perfil do usuário do PC (`%USERPROFILE%\.revenda`). O runner em container o recebe por bind mount em `/revenda-state`: o state é um só para o script 04 (Windows) e para o CD (container), e os dois usam o Terraform 1.16.4. Cada lado tem o seu `TF_DATA_DIR`, porque os providers são de plataformas diferentes.
 - **Por quê**: (1) o cluster só existe nesse PC, então um backend remoto não traria benefício de colaboração; (2) o state contém os segredos gerados em texto claro e, por isso, **nunca** pode ir para o repositório (lição da fase 2); (3) fora do *workspace* do runner, o state sobrevive à limpeza do checkout entre execuções.
 - Evolução: backend remoto com criptografia e *locking* (ex.: S3 + DynamoDB, GCS ou Terraform Cloud) quando houver ambiente compartilhado.
 
@@ -147,13 +147,13 @@ Gatilhos: `pull_request` para `main` e `push` na `main`. Runner: `ubuntu-latest`
 | `qualidade` | Checkout; setup Python 3.12 com cache; instala dependências; `ruff check`; `ruff format --check`; `mypy src`; `lint-imports` (contratos de camadas e módulos) | Erro de lint, formatação, tipagem ou violação da regra de dependência |
 | `testes` | *Service container* `postgres:16`; `alembic upgrade head`; `pytest tests/unit tests/integration --cov=revenda --cov-fail-under=80`; publica relatório de cobertura como artefato | Teste falho ou cobertura < 80% |
 | `imagem` | `docker build` (tag `revenda-api:${{ github.sha }}`, sem push); Trivy na imagem (`severity: CRITICAL,HIGH`, `ignore-unfixed: true`, `exit-code: 1`); Trivy `fs` com scanner `secret` no repositório | Vulnerabilidade crítica/alta corrigível ou segredo detectado |
-| `infra` | `terraform fmt -check -recursive`; `terraform init -backend=false`; `terraform validate`; `infra/kind/cluster.yaml` validado com `yq` (YAML válido, os três `extraPortMappings`, imagem por digest); `kustomize build k8s/base` e `k8s/migracao` validados com `kubeconform -strict` | Formatação, configuração inválida ou manifesto fora do schema |
+| `infra` | `terraform fmt -check -recursive`; `terraform init -backend=false`; `terraform validate`; `infra/kind/cluster.yaml` validado com `yq` (YAML válido, os três `extraPortMappings`, imagem por digest); `hadolint` em `infra/runner/Dockerfile` e `shellcheck` em `infra/runner/entrypoint.sh`; `kustomize build k8s/base` e `k8s/migracao` validados com `kubeconform -strict` | Formatação, configuração inválida ou manifesto fora do schema |
 
 Os quatro jobs rodam em paralelo e são *required status checks* da `main`. O CI não tem acesso a segredos nem ao cluster.
 
 ### 3.3 `cd.yml` — entrega contínua
 
-Gatilhos: `push` na `main` (ou seja, PR mergeado) e `workflow_dispatch` (com input opcional `ref` para rollback). Runner: `runs-on: [self-hosted, Windows, kind-local]` (PC Windows do autor, passos em Git Bash). `environment: local`. `concurrency: { group: deploy-local, cancel-in-progress: false }` (deploys são enfileirados, nunca interrompidos no meio). `permissions: contents: read`.
+Gatilhos: `push` na `main` (ou seja, PR mergeado) e `workflow_dispatch` (com input opcional `ref` para rollback). Runner: `runs-on: [self-hosted, Linux, kind-local]`: container Linux `revenda-runner` no Docker Desktop do PC do autor, na rede docker `kind`, com bash nativo. Por isso o kubeconfig é o interno (`kind export kubeconfig --internal`, API em `https://revenda-control-plane:6443`) e o health/e2e usa `http://revenda-control-plane:30080` (API) e `http://revenda-control-plane:30180` (Keycloak). O `iss` dos tokens continua `http://localhost:8180/realms/revenda`, porque `KC_HOSTNAME` é fixo. O state fica em `/revenda-state/terraform.tfstate` (bind mount de `%USERPROFILE%\.revenda`, o mesmo arquivo do script 04), com `TF_DATA_DIR` no volume do container (providers Linux). `environment: local`. `concurrency: { group: deploy-local, cancel-in-progress: false }` (deploys são enfileirados, nunca interrompidos no meio). `permissions: contents: read`.
 
 | Passo | O que faz | Critério de sucesso |
 |---|---|---|
@@ -211,11 +211,13 @@ Seções: **O que muda e por quê**; **Como testar**; **Tipo** (feat/fix/docs/in
 | Só código revisado | O `cd.yml` dispara apenas em `push` na `main` e `workflow_dispatch`; **nenhum** workflow com `runs-on: self-hosted` reage a `pull_request` |
 | Label dedicada | Runner registrado com a label `kind-local`; somente o `cd.yml` a utiliza |
 | PRs de forks | Configuração do repositório "Require approval for all outside collaborators" para executar workflows; o repositório é público, então esse controle é obrigatório |
-| Usuário sem admin | O runner roda como o usuário Windows logado (Tarefa Agendada no logon, sem privilégio de administrador), porque precisa do Docker Desktop e do `%USERPROFILE%\.kube\config`. Ressalva: acesso ao Docker equivale, na prática, a acesso privilegiado ao host; por isso só código já revisado e mergeado na `main` roda nele, e o ideal em produção seria um runner isolado em VM |
+| Runner em container | O runner nativo para Windows foi bloqueado pelo Smart App Control, então ele roda no container Linux `revenda-runner` (`infra/runner/Dockerfile`, base `ghcr.io/actions/actions-runner:2.337.0`; kind, kubectl, Terraform e Python com versão fixa e checksum). Ele é instalado e removido por `scripts/windows/03-instalar-runner.ps1` e reinicia sozinho (`--restart unless-stopped`). Só são montados o socket do Docker, o volume `revenda-runner-persist` (registro e `TF_DATA_DIR`) e `%USERPROFILE%\.revenda` (state) |
+| Usuário sem root | Dentro do container o runner roda como `runner` (UID 1001). O entrypoint descobre o GID do `/var/run/docker.sock` e põe o usuário nesse grupo. Ressalva: o socket do Docker equivale, na prática, a privilégio de administrador sobre o Docker do host, e quem controla um job controla os containers do PC. Por isso só código já revisado e mergeado na `main` roda nele; em produção o ideal seria um runner efêmero isolado em VM |
+| Token de registro | Uso único, obtido via `gh api` no momento da instalação e passado só por variável de ambiente (nunca na linha de comando nem no log). O entrypoint o apaga do ambiente antes de iniciar o runner |
 | Environment `local` | O job de CD usa o environment `local`, permitindo regras de proteção (ex.: restringir a branch `main`) e segredos de environment, se necessários |
 | Segredos | O runner não guarda segredos da aplicação no GitHub; os valores vêm do Terraform/cluster e são mascarados nos logs |
 | Workspace | Checkout limpo a cada execução; state do Terraform fora do workspace |
-| Atualização | Runner com atualização automática habilitada |
+| Atualização | O runner se atualiza sozinho dentro do container. Ao recriar o container, ele volta à versão da imagem e se atualiza de novo. Para mudar a base, troque o `ARG RUNNER_VERSION` do Dockerfile (por PR) e rode o script 03 |
 
 ## 6. Rollback
 

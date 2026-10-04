@@ -3,6 +3,7 @@
 A plataforma é definida por código em duas partes ([ADR-005](../docs/adrs/ADR-005-kind-terraform-nodeport.md), [docs/08](../docs/08-ci-cd-infra.md)):
 
 - **`kind/cluster.yaml`**: o cluster kind `revenda`, criado pela **CLI `kind`**. O provider Terraform `tehcyx/kind` foi abandonado porque não tem assinatura de código e é bloqueado pelo Smart App Control do Windows 11.
+- **`runner/`**: imagem do runner self-hosted do GitHub Actions, que roda num container Linux no Docker Desktop (o runner nativo para Windows também é bloqueado pelo Smart App Control). Ver a seção "Runner do CD" abaixo.
 - **`terraform/`**: tudo o que fica dentro do cluster: namespaces `revenda` e `identidade`, segredos gerados, os dois PostgreSQL 16, o Keycloak com o realm `revenda` e o metrics-server.
 
 A aplicação (`revenda-api`) não é criada aqui: ela vem de `k8s/` pelo CD.
@@ -20,11 +21,22 @@ A aplicação (`revenda-api`) não é criada aqui: ela vem de `k8s/` pelo CD.
 | `terraform/metrics_server.tf` | Chart `metrics-server` com `--kubelet-insecure-tls` |
 | `terraform/outputs.tf` | URLs, nomes dos Secrets e comandos `kubectl` para lê-los (nenhuma senha) |
 
+## Runner do CD (`runner/`)
+
+| Item | Detalhe |
+|---|---|
+| Imagem | `infra/runner/Dockerfile`: base `ghcr.io/actions/actions-runner:2.337.0` (Ubuntu 24.04, usuário `runner` UID 1001, docker CLI); kind v0.33.0 (SHA-256 fixo), kubectl v1.34.12 (SHA-512 do CHANGELOG-1.34), Terraform 1.16.4 (zip conferido pelo `SHA256SUMS` assinado pela HashiCorp, fingerprint conferido), python3 3.12 + venv + pip, jq, curl, git |
+| Entrypoint | `infra/runner/entrypoint.sh`: ajusta o grupo do `/var/run/docker.sock` sem rodar como root; registra na primeira execução (`config.sh --unattended … --labels kind-local --work _work --replace`) e guarda `.runner`/`.credentials*` no volume; nas seguintes, restaura do volume; `exec ./run.sh` |
+| Execução | `scripts/windows/03-instalar-runner.ps1` faz `docker run -d --name revenda-runner --restart unless-stopped --network kind -v /var/run/docker.sock:/var/run/docker.sock -v revenda-runner-persist:/home/runner/persist --mount type=bind,source=%USERPROFILE%\.revenda,target=/revenda-state`. Remoção: `-Remover` |
+| Dentro do container | kubeconfig interno (`kind export kubeconfig --internal --name revenda` → `https://revenda-control-plane:6443`); API `http://revenda-control-plane:30080`; Keycloak `http://revenda-control-plane:30180`; state `/revenda-state/terraform.tfstate` (o mesmo do Windows); `TF_DATA_DIR=/home/runner/persist/terraform-data` |
+| Lock dos providers | O `.terraform.lock.hcl` precisa valer no Windows (script 04) e no Linux (container). Gere no PC com `terraform -chdir=infra/terraform providers lock -platform=windows_amd64 -platform=linux_amd64` e versione |
+
 ## Versões
 
 | Item | Versão | Fonte |
 |---|---|---|
-| CLI kind | v0.33.0 (PC e runner) | winget |
+| CLI kind | v0.33.0 (PC via winget; runner via GitHub Releases com SHA-256) | release kind v0.33.0 |
+| Runner do Actions | imagem `ghcr.io/actions/actions-runner:2.337.0` | `images/Dockerfile` e `release.yml` de actions/runner |
 | Nó do kind | `kindest/node:v1.34.11@sha256:44e2…d67d` | notas do release kind v0.33.0 |
 | `hashicorp/kubernetes` | `~> 3.3` (3.3.0 corrige o `wait_for_rollout` de StatefulSet) | CHANGELOG do provider |
 | `hashicorp/helm` | `~> 3.3` (sintaxe 3.x: `kubernetes = { ... }`) | CHANGELOG do provider |

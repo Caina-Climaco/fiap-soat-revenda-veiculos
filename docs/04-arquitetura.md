@@ -162,7 +162,7 @@ flowchart TB
 
 ## 5. Visão de implantação
 
-O ambiente é um cluster **kind** de um nó (control-plane) criado pela CLI `kind` (a partir de `infra/kind/cluster.yaml`) no PC do autor, com todo o conteúdo do cluster gerenciado pelo Terraform, que também hospeda o runner self-hosted do GitHub Actions. Não há Ingress: os serviços são publicados por **NodePort** mapeados para portas do host via `extraPortMappings` do kind ([ADR-005](adrs/ADR-005-kind-terraform-nodeport.md)).
+O ambiente é um cluster **kind** de um nó (control-plane) criado pela CLI `kind` (a partir de `infra/kind/cluster.yaml`) no PC do autor, com todo o conteúdo do cluster gerenciado pelo Terraform. O mesmo PC hospeda o runner self-hosted do GitHub Actions, num container Linux no Docker Desktop ligado à rede docker `kind` ([ADR-006](adrs/ADR-006-ci-hospedado-cd-self-hosted.md)). Não há Ingress: os serviços são publicados por **NodePort** mapeados para portas do host via `extraPortMappings` do kind ([ADR-005](adrs/ADR-005-kind-terraform-nodeport.md)).
 
 ```mermaid
 flowchart LR
@@ -171,8 +171,8 @@ flowchart LR
     ci["CI: runner hospedado<br/>ubuntu-latest"]
   end
 
-  subgraph PC["PC do autor (host Linux, Docker)"]
-    runner["Runner self-hosted<br/>label kind-local<br/>usuário sem admin"]
+  subgraph PC["PC do autor (Windows 11, Docker Desktop)"]
+    runner["Container revenda-runner<br/>runner self-hosted Linux<br/>label kind-local, rede kind"]
     tfstate[("Terraform state local<br/>fora do repositório")]
     browser["Navegador / curl"]
 
