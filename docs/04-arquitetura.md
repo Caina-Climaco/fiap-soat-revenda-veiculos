@@ -90,7 +90,7 @@ C4Container
 |---|---|---|
 | `revenda-api` | Imagem `revenda-api:<sha>`, Uvicorn na porta 8000 | Service NodePort 30080 → host 8080 |
 | Job de migração | Mesma imagem, comando `alembic upgrade head` | Não exposto |
-| PostgreSQL `revenda` | `postgres:16-alpine`, PVC | Service ClusterIP `revenda-db:5432` (não exposto ao host) |
+| PostgreSQL `revenda` | `postgres:16-alpine`, PVC | Service `revenda-db:5432`; NodePort 30432 → host `15432` apenas para a demonstração (variável `expor_banco_revenda`) |
 | Keycloak | `quay.io/keycloak/keycloak:26.x`, `start-dev --import-realm` | Service NodePort 30180 → host 8180 |
 | PostgreSQL `keycloak` | `postgres:16-alpine`, PVC | Service ClusterIP `keycloak-db:5432` (não exposto) |
 
@@ -213,7 +213,7 @@ flowchart LR
 
 | Elemento | Detalhe |
 |---|---|
-| Mapeamento de portas | host `8080` → nodePort `30080` (API); host `8180` → nodePort `30180` (Keycloak). Bancos **não** são expostos ao host; a demonstração do banco usa `kubectl exec ... psql` |
+| Mapeamento de portas | host `8080` → nodePort `30080` (API); host `8180` → nodePort `30180` (Keycloak). host `15432` → nodePort `30432` (banco da API, só para demonstração; desligável com `expor_banco_revenda=false`). O banco do Keycloak **não** é exposto |
 | Secrets (Terraform) | `revenda-db-credentials`, `revenda-webhook-secret` (ns `revenda`); `keycloak-db-credentials`, `keycloak-admin`, `keycloak-gestor` (ns `identidade`) |
 | NetworkPolicy | `revenda-db` só aceita tráfego de pods com o rótulo de acesso ao banco (API e Job de migração); `keycloak-db` só aceita do Keycloak |
 | Emissor dos tokens | `KC_HOSTNAME=http://localhost:8180`, então `iss = http://localhost:8180/realms/revenda`. A API busca o JWKS pelo endereço interno do Service, mas valida o `iss` público (ver [07-seguranca-lgpd.md](07-seguranca-lgpd.md)) |

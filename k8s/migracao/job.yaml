@@ -1,0 +1,69 @@
+# Migracao do banco revenda (docs/06-dados.md, secao 5). Mesma imagem da API.
+# O CD apaga o Job anterior antes de aplicar (Jobs sao imutaveis).
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: revenda-migracao
+  labels:
+    app: revenda-migracao
+    app.kubernetes.io/name: revenda-migracao
+    app.kubernetes.io/component: migracao
+    app.kubernetes.io/part-of: revenda-veiculos
+spec:
+  backoffLimit: 2
+  activeDeadlineSeconds: 300
+  ttlSecondsAfterFinished: 600
+  template:
+    metadata:
+      labels:
+        # "app" e o rotulo usado pela NetworkPolicy do revenda-db (infra/terraform).
+        app: revenda-migracao
+        app.kubernetes.io/name: revenda-migracao
+        app.kubernetes.io/component: migracao
+        app.kubernetes.io/part-of: revenda-veiculos
+        revenda.io/acesso-db: "true"
+    spec:
+      restartPolicy: Never
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: migracao
+          image: revenda-api:dev
+          imagePullPolicy: IfNotPresent
+          workingDir: /app
+          command: ["alembic", "upgrade", "head"]
+          env:
+            - name: DB_HOST
+              value: revenda-db.revenda.svc.cluster.local
+            - name: DB_PORT
+              value: "5432"
+          envFrom:
+            # DB_USER, DB_PASSWORD, DB_NAME
+            - secretRef:
+                name: revenda-db-credentials
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

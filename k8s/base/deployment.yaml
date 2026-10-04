@@ -1,0 +1,98 @@
+# revenda-api (docs/08-ci-cd-infra.md, secao 2.2). O numero de replicas e controlado
+# pelo HPA (2..5): o campo replicas e omitido para o `kubectl apply` nao brigar com ele.
+# Contrato com o CD: container "api" (kubectl set image deployment/revenda-api api=...).
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: revenda-api
+  labels:
+    app: revenda-api
+    app.kubernetes.io/name: revenda-api
+    app.kubernetes.io/component: api
+    app.kubernetes.io/part-of: revenda-veiculos
+spec:
+  revisionHistoryLimit: 5
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxUnavailable: 0
+      maxSurge: 1
+  selector:
+    matchLabels:
+      app: revenda-api
+  template:
+    metadata:
+      labels:
+        # "app" e o rotulo usado pela NetworkPolicy do revenda-db (infra/terraform).
+        app: revenda-api
+        app.kubernetes.io/name: revenda-api
+        app.kubernetes.io/component: api
+        app.kubernetes.io/part-of: revenda-veiculos
+        revenda.io/acesso-db: "true"
+    spec:
+      automountServiceAccountToken: false
+      enableServiceLinks: false
+      terminationGracePeriodSeconds: 30
+      securityContext:
+        runAsNonRoot: true
+        runAsUser: 10001
+        runAsGroup: 10001
+        fsGroup: 10001
+        seccompProfile:
+          type: RuntimeDefault
+      containers:
+        - name: api
+          image: revenda-api:dev
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: revenda-api-config
+            # DB_USER, DB_PASSWORD, DB_NAME
+            - secretRef:
+                name: revenda-db-credentials
+            # WEBHOOK_SECRET
+            - secretRef:
+                name: revenda-webhook-secret
+          resources:
+            requests:
+              cpu: 100m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 256Mi
+          securityContext:
+            allowPrivilegeEscalation: false
+            readOnlyRootFilesystem: true
+            capabilities:
+              drop: ["ALL"]
+          startupProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 2
+            failureThreshold: 30
+          livenessProbe:
+            httpGet:
+              path: /health/live
+              port: http
+            periodSeconds: 10
+            timeoutSeconds: 3
+            failureThreshold: 3
+          readinessProbe:
+            httpGet:
+              path: /health/ready
+              port: http
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          volumeMounts:
+            - name: tmp
+              mountPath: /tmp
+      volumes:
+        - name: tmp
+          emptyDir:
+            sizeLimit: 64Mi

@@ -1,0 +1,168 @@
+# Ambiente de DESENVOLVIMENTO que espelha o cluster kind (docs/04-arquitetura.md, seção 5):
+#   API        http://localhost:8080  (Swagger UI em /docs)      -> container 8000
+#   Keycloak   http://localhost:8180  (realm revenda, admin em /admin)
+#   PostgreSQL da API (revenda-db) e PostgreSQL do Keycloak (keycloak-db) em instâncias e
+#   redes separadas: a API não alcança o banco do Keycloak, e vice-versa.
+#
+# Uso:
+#   cp .env.example .env        # e troque os valores (o .env é ignorado pelo Git)
+#   docker compose up -d --build
+#   docker compose up -d postgres   # só o banco, para os testes de integração (porta 5432)
+#
+# Segredos vêm do .env; nada sensível é versionado aqui. O Keycloak importa
+# ./keycloak/realm-revenda.json só na primeira subida (o realm fica no volume keycloak-db).
+
+name: revenda
+
+services:
+  # ------------------------------------------------------------ banco da API
+  postgres:
+    image: postgres:16.15-alpine
+    environment:
+      POSTGRES_DB: ${DB_NAME:-revenda}
+      POSTGRES_USER: ${DB_USER:-revenda}
+      POSTGRES_PASSWORD: ${DB_PASSWORD:?defina DB_PASSWORD no .env}
+    configs:
+      # Banco extra para os testes de integração (TEST_DATABASE_URL .../revenda_test).
+      - source: banco-de-testes
+        target: /docker-entrypoint-initdb.d/10-revenda-test.sql
+    volumes:
+      - revenda-db:/var/lib/postgresql/data
+    ports:
+      - "127.0.0.1:5432:5432"
+    networks:
+      revenda:
+        aliases: [revenda-db]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d \"$$POSTGRES_DB\""]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  # ------------------------------------------------------------ migração (= Job do k8s)
+  migracao:
+    build: .
+    image: revenda-api:dev
+    command: ["alembic", "upgrade", "head"]
+    environment: &ambiente-db
+      DB_HOST: revenda-db
+      DB_PORT: "5432"
+      DB_NAME: ${DB_NAME:-revenda}
+      DB_USER: ${DB_USER:-revenda}
+      DB_PASSWORD: ${DB_PASSWORD:?defina DB_PASSWORD no .env}
+    user: "10001:10001"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+    networks: [revenda]
+    restart: "no"
+
+  # ------------------------------------------------------------ API
+  api:
+    image: revenda-api:dev
+    environment:
+      <<: *ambiente-db
+      # iss dos tokens = endereço público do Keycloak (o navegador loga por ele)...
+      OIDC_ISSUER: http://localhost:8180/realms/revenda
+      # ...mas as chaves são buscadas pelo nome interno do serviço.
+      OIDC_JWKS_URL: http://keycloak:8080/realms/revenda/protocol/openid-connect/certs
+      OIDC_AUDIENCE: revenda-api
+      OIDC_SWAGGER_CLIENT_ID: revenda-swagger
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:?defina WEBHOOK_SECRET no .env}
+      RESERVA_TTL_MINUTOS: ${RESERVA_TTL_MINUTOS:-30}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+    ports:
+      - "8080:8000"
+    user: "10001:10001"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    depends_on:
+      migracao:
+        condition: service_completed_successfully
+      keycloak:
+        condition: service_started
+    networks: [revenda]
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health/ready', timeout=3)"
+      interval: 10s
+      timeout: 5s
+      retries: 6
+    restart: unless-stopped
+
+  # ------------------------------------------------------------ identidade
+  keycloak-db:
+    image: postgres:16.15-alpine
+    environment:
+      POSTGRES_DB: keycloak
+      POSTGRES_USER: ${KC_DB_USERNAME:-keycloak}
+      POSTGRES_PASSWORD: ${KC_DB_PASSWORD:?defina KC_DB_PASSWORD no .env}
+    volumes:
+      - keycloak-db:/var/lib/postgresql/data
+    networks: [identidade]
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$$POSTGRES_USER\" -d keycloak"]
+      interval: 5s
+      timeout: 5s
+      retries: 12
+
+  keycloak:
+    image: quay.io/keycloak/keycloak:26.4
+    command: ["start-dev", "--import-realm"]
+    environment:
+      KC_DB: postgres
+      KC_DB_URL: jdbc:postgresql://keycloak-db:5432/keycloak
+      KC_DB_USERNAME: ${KC_DB_USERNAME:-keycloak}
+      KC_DB_PASSWORD: ${KC_DB_PASSWORD:?defina KC_DB_PASSWORD no .env}
+      KC_HOSTNAME: http://localhost:8180
+      KC_HOSTNAME_BACKCHANNEL_DYNAMIC: "true"
+      KC_HTTP_ENABLED: "true"
+      KC_HEALTH_ENABLED: "true"
+      KC_BOOTSTRAP_ADMIN_USERNAME: ${KC_BOOTSTRAP_ADMIN_USERNAME:-admin}
+      KC_BOOTSTRAP_ADMIN_PASSWORD: ${KC_BOOTSTRAP_ADMIN_PASSWORD:?defina KC_BOOTSTRAP_ADMIN_PASSWORD no .env}
+      # Substitui o placeholder ${GESTOR_PASSWORD} do realm-revenda.json no import.
+      GESTOR_PASSWORD: ${GESTOR_PASSWORD:?defina GESTOR_PASSWORD no .env}
+    volumes:
+      - ./keycloak/realm-revenda.json:/opt/keycloak/data/import/realm-revenda.json:ro
+    ports:
+      - "8180:8080"
+    depends_on:
+      keycloak-db:
+        condition: service_healthy
+    # Na rede "revenda" só para a API buscar o JWKS; o banco do Keycloak fica isolado.
+    networks: [identidade, revenda]
+    healthcheck:
+      # A imagem não tem curl: requisição HTTP crua à porta de gerenciamento (9000).
+      test:
+        - CMD-SHELL
+        - >-
+          exec 3<>/dev/tcp/127.0.0.1/9000 &&
+          printf 'GET /health/ready HTTP/1.1\r\nHost: localhost\r\nConnection: close\r\n\r\n' >&3 &&
+          grep -q '"UP"' <&3
+      interval: 10s
+      timeout: 5s
+      retries: 30
+      start_period: 30s
+    restart: unless-stopped
+
+configs:
+  banco-de-testes:
+    content: |
+      CREATE DATABASE revenda_test;
+
+volumes:
+  revenda-db:
+  keycloak-db:
+
+networks:
+  revenda:
+  identidade:

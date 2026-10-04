@@ -45,27 +45,30 @@ Pré-requisitos: Python 3.12, Docker e, para e2e, o ambiente implantado (ver REA
 
 ```bash
 # 1. Dependências de desenvolvimento
-python -m venv .venv && source .venv/bin/activate
-pip install -e ".[dev]"
+uv sync          # cria .venv com dependências de desenvolvimento (uv.lock)
 
 # 2. Unidade (rápido, sem dependências externas)
-pytest -m unit
+uv run pytest -m unit
 
 # 3. Integração (sobe só o PostgreSQL do docker compose)
 docker compose up -d postgres
 export TEST_DATABASE_URL="postgresql+psycopg://revenda:revenda@localhost:5432/revenda_test"
-pytest -m integration
+uv run pytest -m integration
 
 # 4. Unidade + integração com cobertura (mesmo critério do CI)
-pytest -m "unit or integration" --cov=revenda --cov-branch \
+uv run pytest -m "unit or integration" --cov=revenda --cov-branch \
   --cov-report=term-missing --cov-report=xml --cov-fail-under=80
 
 # 5. Ponta a ponta contra o ambiente implantado no kind
 export E2E_API_URL="http://localhost:8080"
 export E2E_KEYCLOAK_URL="http://localhost:8180"
-export E2E_WEBHOOK_SECRET="$(kubectl -n revenda get secret revenda-webhook-secret \
-  -o jsonpath='{.data.WEBHOOK_SECRET}' | base64 -d)"
-pytest -m e2e -v
+segredo() { kubectl -n "$1" get secret "$2" -o jsonpath="{.data.$3}" | base64 -d; }
+export E2E_WEBHOOK_SECRET="$(segredo revenda revenda-webhook-secret WEBHOOK_SECRET)"
+export E2E_GESTOR_PASSWORD="$(segredo identidade keycloak-gestor GESTOR_PASSWORD)"
+export E2E_KC_ADMIN_USER="$(segredo identidade keycloak-admin KC_BOOTSTRAP_ADMIN_USERNAME)"
+export E2E_KC_ADMIN_PASSWORD="$(segredo identidade keycloak-admin KC_BOOTSTRAP_ADMIN_PASSWORD)"
+pip install -r tests/e2e/requirements.txt   # e2e não depende do pacote revenda
+pytest tests/e2e -m e2e -o addopts="" -v
 ```
 
 Observações:
