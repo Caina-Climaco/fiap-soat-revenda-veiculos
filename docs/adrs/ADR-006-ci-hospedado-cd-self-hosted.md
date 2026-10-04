@@ -19,7 +19,7 @@ O time de qualidade exige que toda implantação ou alteração passe por CI/CD 
 ## Decisão
 
 - `ci.yml` roda em `ubuntu-latest` a cada PR para a `main` e a cada push na `main`. Faz lint, tipagem, testes unitários e de integração com PostgreSQL, cobertura mínima de 80%, build da imagem, Trivy, `terraform fmt`/`validate` e kubeconform.
-- `cd.yml` roda em `[self-hosted, Linux, kind-local]`, **somente** em push na `main` (ou seja, PR mergeado) e em `workflow_dispatch`, com `concurrency` para impedir deploys simultâneos.
+- `cd.yml` roda em `[self-hosted, Linux, kind-local]`, **somente** em push na `main` (ou seja, PR mergeado) e em `workflow_dispatch` (com a `ref` informada validada como ancestral de `origin/main`), com `concurrency` para impedir deploys simultâneos.
 - O runner self-hosted roda num **container Linux no Docker Desktop do PC** (`infra/runner/Dockerfile`, imagem oficial `ghcr.io/actions/actions-runner` com kind, kubectl, Terraform e Python), instalado por `scripts/windows/03-instalar-runner.ps1`:
   - o container está na rede docker `kind` e alcança o cluster pelo nome do nó (`revenda-control-plane`);
   - usa o Docker do host pelo socket montado (`docker build`, `kind load`);
@@ -34,7 +34,6 @@ O time de qualidade exige que toda implantação ou alteração passe por CI/CD 
 ### Positivas
 - Toda mudança em código, infraestrutura ou manifestos passa por PR, CI e deploy automático, com rastreabilidade pelo SHA.
 - O runner self-hosted só executa código já revisado e mergeado.
-
 - Runner em container: isolado do sistema de arquivos do Windows (só o diretório do state é montado), reiniciado automaticamente (`--restart unless-stopped`, inclusive quando o Docker Desktop sobe) e com Linux nativo (bash, sem as conversões de caminho do Git Bash).
 
 ### Negativas
@@ -42,9 +41,15 @@ O time de qualidade exige que toda implantação ou alteração passe por CI/CD 
 - O socket do Docker montado no container equivale, na prática, a privilégio de administrador sobre o Docker do host. Quem controla um job controla os containers do PC, inclusive o cluster.
 - O state do Terraform é compartilhado entre o Terraform do Windows (script 04) e o do container. Os dois precisam usar a mesma versão (1.16.4), e o arquivo trafega pelo compartilhamento de arquivos do Docker Desktop.
 - Num trabalho individual, a aprovação de PR por outra pessoa não é possível.
+- O repositório é público, e a documentação do GitHub desaconselha runners self-hosted em repositórios públicos: um fork poderia abrir um PR com um workflow que executa código arbitrário na máquina do runner.
 
 ## Mitigações
-- Só código já revisado e mergeado na `main` (ou disparado manualmente pelo dono) roda no runner; nenhum workflow self-hosted reage a `pull_request`, e PRs de fork exigem aprovação. Isso limita o risco do socket do Docker.
+- Runner self-hosted em repositório público:
+  - o `cd.yml` é o único workflow com `runs-on: [self-hosted, ...]` e só dispara em `push` na `main` (PR já mergeado) ou em `workflow_dispatch`; no disparo manual, o primeiro passo recusa qualquer `ref` que não seja ancestral de `origin/main` (rollback só para commits que já passaram pela `main`);
+  - o CI de PR (`ci.yml`) roda **somente** no runner hospedado (`ubuntu-latest`); nenhum workflow self-hosted reage a `pull_request`;
+  - workflows de PRs vindos de forks exigem aprovação do dono do repositório para rodar.
+
+  Juntas, essas regras limitam o risco do socket do Docker a código revisado.
 - Dentro do container o runner roda como o usuário `runner` (UID 1001), não como root; o acesso ao socket vem do grupo do socket, ajustado pelo entrypoint. O token de registro é de uso único, só trafega por variável de ambiente e não fica disponível para os jobs.
 - O job registra o resultado no resumo da execução.
 - Aprovações exigidas = 0, mas CI verde obrigatório e checklist no template de PR. A decisão fica registrada aqui.

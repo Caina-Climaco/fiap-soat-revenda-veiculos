@@ -10,9 +10,11 @@
 #     -SemBancoExposto  nao publica o revenda-db em localhost:15432
 #     -Recriar          apaga o cluster e o state antes (ambiente do zero; dados e senhas novos)
 #
-# State: %USERPROFILE%\.revenda\terraform.tfstate e TF_DATA_DIR em
-# %USERPROFILE%\.revenda\terraform-data -- os MESMOS caminhos usados pelo cd.yml, entao o
-# script e o CD compartilham o mesmo ambiente. Nunca dentro do repositorio (ADR-011).
+# State: %USERPROFILE%\.revenda\terraform.tfstate (TF_DATA_DIR em
+# %USERPROFILE%\.revenda\terraform-data). O CD usa o MESMO arquivo de state: o runner e um
+# container Linux que monta %USERPROFILE%\.revenda em /revenda-state; so o TF_DATA_DIR
+# dele e outro (providers Linux). Script e CD compartilham o mesmo ambiente.
+# Nunca dentro do repositorio (ADR-011).
 # Log: .setup\relatorio-ambiente-subir.txt. Arquivo somente ASCII (Windows PowerShell 5.1).
 param(
     [switch]$SemBancoExposto,
@@ -66,9 +68,11 @@ if ((Invocar "docker" @("version", "--format", "docker {{.Server.Version}}")) -n
 $null = Invocar "kind" @("version")
 $null = Invocar "terraform" @("version")
 
-# ------------------------------------------------------------------ caminhos (iguais ao cd.yml)
-# Barras normais: o cd.yml (Git Bash, cygpath -m) grava "C:/Users/<voce>/.revenda/...".
-# Se o caminho do backend mudasse de forma, o terraform init pediria migracao de state.
+# ------------------------------------------------------------------ caminhos (state compartilhado com o cd.yml)
+# O cd.yml roda no container Linux do runner (infra/runner) e le/grava o mesmo
+# terraform.tfstate em /revenda-state, bind mount de %USERPROFILE%\.revenda; o
+# TF_DATA_DIR dele e proprio (/home/runner/persist/terraform-data). Aqui o caminho usa
+# barras normais e fica sempre igual, para o terraform init nao pedir migracao de state.
 $perfil = $env:USERPROFILE -replace '\\', '/'
 $stateDir = "$perfil/.revenda"
 $statePath = "$stateDir/terraform.tfstate"

@@ -34,6 +34,9 @@ from revenda.vendas.domain.venda import (
 
 _logger = logging.getLogger("revenda.vendas")
 
+# Quantas reservas vencidas cada leitura cancela antes de consultar (mesmo teto da vitrine).
+LIMITE_VARREDURA_EXPIRADAS = 100
+
 
 @dataclass(frozen=True, slots=True)
 class Solicitante:
@@ -213,11 +216,26 @@ class ExpirarReservasVencidas(_BaseVendas):
         return len(vencidas)
 
 
-class ObterVenda:
-    def __init__(self, repo: VendaRepository) -> None:
-        self._repo = repo
+class _LeituraComExpiracao:
+    """Leituras que antes aplicam a expiração preguiçosa (ADR-009), como a vitrine (R1).
 
+    Assim nenhuma consulta mostra como AGUARDANDO_PAGAMENTO uma reserva que já venceu.
+    """
+
+    def __init__(
+        self, repo: VendaRepository, expirador: ExpirarReservasVencidas | None = None
+    ) -> None:
+        self._repo = repo
+        self._expirador = expirador
+
+    def _expirar_vencidas(self) -> None:
+        if self._expirador is not None:
+            self._expirador.expirar_vencidas(LIMITE_VARREDURA_EXPIRADAS)
+
+
+class ObterVenda(_LeituraComExpiracao):
     def executar(self, venda_id: UUID, solicitante: Solicitante) -> Venda:
+        self._expirar_vencidas()
         venda = self._repo.obter(venda_id)
         # Para quem não é dono nem gestor, a venda "não existe" (RN-13, proteção BOLA).
         if venda is None or not _visivel(venda, solicitante):
@@ -225,17 +243,16 @@ class ObterVenda:
         return venda
 
 
-class ListarVendas:
-    def __init__(self, repo: VendaRepository) -> None:
-        self._repo = repo
-
+class ListarVendas(_LeituraComExpiracao):
     def do_comprador(self, comprador_id: str, *, limite: int, deslocamento: int) -> Pagina[Venda]:
+        self._expirar_vencidas()
         itens, total = self._repo.listar(
             comprador_id=comprador_id, status=None, limite=limite, deslocamento=deslocamento
         )
         return Pagina(itens=itens, total=total, limite=limite, deslocamento=deslocamento)
 
     def todas(self, *, status: StatusVenda | None, limite: int, deslocamento: int) -> Pagina[Venda]:
+        self._expirar_vencidas()
         itens, total = self._repo.listar(
             comprador_id=None, status=status, limite=limite, deslocamento=deslocamento
         )

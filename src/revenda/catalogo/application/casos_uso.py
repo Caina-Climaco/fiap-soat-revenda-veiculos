@@ -80,7 +80,7 @@ class EditarVeiculo:
         if veiculo is None:
             raise VeiculoNaoEncontradoError(veiculo_id)
         versao_lida = veiculo.versao
-        veiculo.editar(
+        alterou = veiculo.editar(
             agora=self._relogio.agora(),
             marca=dados.marca,
             modelo=dados.modelo,
@@ -88,6 +88,8 @@ class EditarVeiculo:
             cor=dados.cor,
             preco=dados.preco,
         )
+        if not alterou:
+            return veiculo  # nada mudou: sem nova versão, sem evento, sem escrita
         # A leitura não trava a linha: se o veículo for reservado ou editado entre a
         # leitura e a gravação, o UPDATE condicional não afeta nenhuma linha.
         if not self._repo.salvar_edicao(veiculo, versao_lida):
@@ -98,10 +100,15 @@ class EditarVeiculo:
 
 
 class ObterVeiculo:
-    def __init__(self, repo: VeiculoRepository) -> None:
+    def __init__(self, repo: VeiculoRepository, expirador: ExpiradorReservas | None = None) -> None:
         self._repo = repo
+        self._expirador = expirador
 
     def executar(self, veiculo_id: UUID) -> Veiculo:
+        # Mesma expiração preguiçosa da vitrine: a consulta nunca mostra RESERVADO para um
+        # veículo cuja reserva já venceu.
+        if self._expirador is not None:
+            self._expirador.expirar_vencidas(LIMITE_VARREDURA_EXPIRADAS)
         veiculo = self._repo.obter(veiculo_id)
         if veiculo is None:
             raise VeiculoNaoEncontradoError(veiculo_id)

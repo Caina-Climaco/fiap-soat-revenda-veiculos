@@ -22,10 +22,10 @@ Fronteiras de confiança: (1) internet/navegador → API e Keycloak; (2) gateway
 
 | Componente | S — Falsificação | T — Adulteração | R — Repúdio | I — Divulgação | D — Negação de serviço | E — Elevação de privilégio |
 |---|---|---|---|---|---|---|
-| **revenda-api (endpoints com JWT)** | Token forjado ou de outro emissor → assinatura RS256 via JWKS, `iss`, `aud`, `azp`, `exp` validados; `alg` fixo | Alteração de claims → assinatura; alteração de preço pelo cliente → preço vem do banco, não do corpo | Ações sem trilha → log estruturado com `sub`, `request_id`, eventos de domínio | Acesso a venda alheia (BOLA) → filtro por `comprador_id`; 404 para não dono; erros sem stack trace | Abuso das listagens → paginação com limite 100; HPA; *rate limiting* como evolução | Cliente chamando rota de gestor → RBAC por `realm_access.roles` em cada rota |
+| **revenda-api (endpoints com JWT)** | Token forjado ou de outro emissor → assinatura RS256 via JWKS, `iss`, `aud`, `azp`, `exp` validados; `alg` fixo | Alteração de claims → assinatura; alteração de preço pelo cliente → preço vem do banco, não do corpo | Ações sem trilha → log estruturado com `sub`, `request_id`, eventos de domínio | Acesso a venda alheia (BOLA) → filtro por `comprador_id`; 404 para não dono; erros sem stack trace | Abuso das listagens → paginação com `limite` ≤ 100 e `deslocamento` ≤ 1.000.000; HPA; *rate limiting* na borda como evolução ([ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md)) | Cliente chamando rota de gestor → RBAC por `realm_access.roles` em cada rota |
 | **Webhook de pagamento** | Chamador se passando pelo gateway → `X-Webhook-Secret` comparado em tempo constante | Replay de notificação → idempotência por estado da venda; HMAC do corpo com timestamp como evolução | Gateway nega ter enviado → log do payload (sem segredo) e do `request_id` | Segredo exposto em log → header nunca é registrado | Inundação de chamadas → custo baixo por chamada; rate limiting como evolução | Efetivar venda sem pagamento → só com segredo válido |
-| **Keycloak** | Senha fraca / força bruta → política de senha do realm e *brute force detection* habilitados | Alteração de papéis → console admin com senha gerada pelo Terraform, não exposta no repositório | Logins não rastreados → eventos de login e de admin habilitados no realm | Vazamento de dados pessoais pelo token → token só com `sub` e papéis (sem `profile`/`email`) | Sobrecarga do login → fora do escopo local | Autocadastro obtendo `gestor` → papel padrão é apenas `cliente`; `gestor` só por admin |
-| **PostgreSQL revenda** | Conexão de pod não autorizado → NetworkPolicy + credencial por Secret | SQL injection → SQLAlchemy com parâmetros vinculados, sem SQL concatenado | — | Leitura do banco → não contém dados pessoais (só pseudônimo) | Esgotamento de conexões → pool limitado por réplica | Usuário da aplicação com DDL → evolução: separar papel de migração e de aplicação |
+| **Keycloak** | Senha fraca / força bruta → política de senha do realm e *brute force detection* habilitados | Alteração de papéis → console admin com senha gerada pelo Terraform, não exposta no repositório | Logins não rastreados → eventos de login e de admin habilitados no realm | Vazamento de dados pessoais pelo token → access token só com `sub`, papéis e audiência (`profile` e `email` apenas opcionais nos clients) | Sobrecarga do login → fora do escopo local | Autocadastro obtendo `gestor` → papel padrão é apenas `cliente`; `gestor` só por admin |
+| **PostgreSQL revenda** | Conexão de pod não autorizado → NetworkPolicy + credencial por Secret | SQL injection → SQLAlchemy com parâmetros vinculados, sem SQL concatenado | — | Leitura do banco → não contém dados pessoais (só pseudônimo); logs do SQLAlchemy sem valores de parâmetros (`hide_parameters`) | Esgotamento de conexões → pool limitado por réplica | Usuário da aplicação com DDL → evolução: separar papel de migração e de aplicação |
 | **PostgreSQL keycloak** | Idem → NetworkPolicy só a partir do Keycloak | — | — | Exposição de dados pessoais → banco não exposto ao host; instância separada | — | API sem credencial para este banco |
 | **CI/CD e runner self-hosted** | PR de fork executando no runner → CD só em `push` na `main`; fork PRs exigem aprovação | Alteração do pipeline sem revisão → `main` protegida, PR e CI obrigatórios | Deploy sem autoria → cada deploy vinculado a SHA e PR | Segredos no repositório → gerados pelo Terraform, `.gitignore`, varredura no CI | Deploys simultâneos → `concurrency: deploy-local` | Runner com admin no host → usuário dedicado sem sudo |
 | **Imagem e dependências** | Imagem base adulterada → imagens oficiais com versão fixa | Dependência vulnerável → Trivy CRITICAL/HIGH no CI; lockfile | — | — | — | Container como root → `runAsNonRoot`, `readOnlyRootFilesystem`, sem capabilities |
@@ -42,6 +42,7 @@ Fronteiras de confiança: (1) internet/navegador → API e Keycloak; (2) gateway
   4. **`aud`** contendo `revenda-api` e **`azp`** na lista de clients autorizados: um token emitido pelo mesmo realm para outra aplicação não é aceito.
 - O JWKS é obtido pelo endereço interno do Service do Keycloak e mantido em cache, com recarga ao surgir um `kid` novo (rotação de chaves) limitada a uma por minuto, para que tokens com `kid` aleatório não virem um vetor de negação de serviço contra o Keycloak.
 - Tempo de vida do access token: 5 minutos (padrão do Keycloak), o que limita a janela de uso de um token vazado.
+- Conteúdo do access token: `sub`, `realm_access.roles`, `aud` (`revenda-api`), `azp` e as claims técnicas (`iss`, `exp`, `iat`). Nome e e-mail não são incluídos, porque os escopos `profile` e `email` são apenas opcionais nos clients `revenda-swagger` e `revenda-e2e`; CPF e telefone nunca são mapeados para o token. O realm é importado com a estratégia `IGNORE_EXISTING` (só na criação): num ambiente já existente, a mudança de escopos só vale depois de recriar o realm ou de aplicá-la pelo console de administração.
 
 ### 3.2 Autorização (RBAC) e controle por objeto
 
@@ -54,9 +55,9 @@ Fronteiras de confiança: (1) internet/navegador → API e Keycloak; (2) gateway
 
 | Onde | Aplicação |
 |---|---|
-| Tokens | Só as claims necessárias (`sub`, papéis, `aud`, `azp`); sem dados pessoais |
+| Tokens | Só as claims necessárias (`sub`, papéis, `aud`, `azp`); sem dados pessoais. Nos clients `revenda-swagger` e `revenda-e2e`, os escopos `profile` e `email` são apenas opcionais |
 | Pods | `runAsNonRoot: true`, `runAsUser: 10001`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `readOnlyRootFilesystem: true` (com `emptyDir` em `/tmp`), `seccompProfile: RuntimeDefault`, `automountServiceAccountToken: false` |
-| Rede | NetworkPolicy: banco da API só aceita API e Job de migração; banco do Keycloak só aceita o Keycloak. Bancos sem NodePort |
+| Rede | NetworkPolicy: banco da API só aceita pods `app=revenda-api` e `app=revenda-migracao`; banco do Keycloak só aceita `app=keycloak` e nunca é exposto. O banco da API é publicado em `127.0.0.1:15432` (NodePort 30432) apenas para a demonstração do vídeo, com `expor_banco_revenda = true` (padrão); `false` o torna ClusterIP |
 | Credenciais | API sem credencial do banco do Keycloak e vice-versa; Secrets montados apenas nos pods que os usam |
 | Pipelines | `permissions: contents: read` nos workflows; o runner self-hosted roda como usuário sem privilégio de administrador |
 | Banco | Evolução: papel `revenda_migracao` (DDL) separado de `revenda_app` (somente DML nos schemas `catalogo` e `vendas`) |
@@ -80,7 +81,7 @@ Sobre o suporte a NetworkPolicy: o CNI padrão do kind (kindnet) passou a implem
 
 ### 3.6 Proteção contra abuso (rate limiting) — evolução
 
-Não implementado nesta entrega. Recomendações: limite por IP nas rotas públicas e por `sub` em `POST /api/v1/vendas` (por exemplo, no gateway de API ou com um middleware de *token bucket*), além de um **limite de reservas ativas por comprador**, que impediria um único cliente de reservar todo o estoque (risco de "fluxo de negócio sensível" do OWASP API Security Top 10). Mitigações já existentes: paginação com limite máximo, expiração das reservas em 30 minutos e HPA.
+Não implementado nesta entrega: não há API Gateway na frente da API ([ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md)). Recomendações: limite por IP nas rotas públicas e por `sub` em `POST /api/v1/vendas` (por exemplo, no gateway de API ou com um middleware de *token bucket*), além de um **limite de reservas ativas por comprador**, que impediria um único cliente de reservar todo o estoque (risco de "fluxo de negócio sensível" do OWASP API Security Top 10). Mitigações já existentes: paginação com limites máximos (`limite` ≤ 100 e `deslocamento` ≤ 1.000.000), validações estritas de entrada, expiração das reservas em 30 minutos e HPA.
 
 ### 3.7 Containers, imagem e cadeia de suprimentos
 
@@ -95,7 +96,8 @@ No ambiente local, a comunicação é HTTP em `localhost` e o Keycloak roda em `
 
 ### 3.9 Logs e auditoria
 
-- Log estruturado em JSON com `request_id`, rota, status, latência e `sub` (pseudônimo). Nunca são registrados: tokens, header `Authorization`, `X-Webhook-Secret`, senhas.
+- Log estruturado em JSON com `request_id`, rota, status, latência e `sub` (pseudônimo). Nunca são registrados: tokens, header `Authorization`, `X-Webhook-Secret`, senhas. O engine do SQLAlchemy usa `hide_parameters=True`, para que erros de banco não levem valores de parâmetros ao log. Respostas 5xx são registradas em nível `ERROR`.
+- `GET /metrics` (Prometheus) expõe só contagens e latências por rota template, status e motivo de cancelamento, sem identificadores nem dados pessoais. No ambiente local ele é público como as listagens; em produção deve ficar restrito à rede interna do cluster (Service ClusterIP ou NetworkPolicy para o Prometheus), porque os contadores de vendas são informação de negócio ([12-observabilidade.md](12-observabilidade.md)).
 - Eventos de domínio (`CompraIniciada`, `VendaEfetivada`, `VendaCancelada`, `ReservaExpirada` etc.) são registrados como trilha de auditoria de negócio.
 - No Keycloak, eventos de login e de administração ficam habilitados no realm.
 
@@ -107,13 +109,13 @@ No ambiente local, a comunicação é HTTP em `localhost` e o Keycloak roda em `
 |---|---|
 | A01 Broken Access Control | RBAC por rota; filtro por `comprador_id`; 404 para não dono; `comprador_id` só do token |
 | A02 Cryptographic Failures | JWT RS256; senhas com hash no Keycloak; segredos aleatórios gerados; TLS como requisito de produção |
-| A03 Injection | ORM com parâmetros vinculados; validação de entrada com Pydantic (tipos, tamanhos, enums, regex do código de pagamento) |
+| A03 Injection | ORM com parâmetros vinculados; validação de entrada com Pydantic (tipos estritos, tamanhos, enums, regex do código de pagamento); caracteres de controle rejeitados em marca, modelo e cor (422), o que também evita injeção em logs |
 | A04 Insecure Design | Modelagem de ameaças (este documento); invariantes no domínio e no banco; UPDATE condicional e índice único parcial contra venda dupla |
-| A05 Security Misconfiguration | Containers non-root e read-only; bancos sem exposição; `start-dev` restrito ao ambiente local; erros sem stack trace |
+| A05 Security Misconfiguration | Containers non-root e read-only; banco do Keycloak sem exposição e banco da API exposto só em `127.0.0.1` para demonstração; `start-dev` restrito ao ambiente local; erros sem stack trace |
 | A06 Vulnerable and Outdated Components | Trivy no CI; Dependabot; versões fixadas de imagens e providers |
 | A07 Identification and Authentication Failures | Autenticação delegada ao Keycloak (política de senha, *brute force detection*); validação completa do token; tokens de vida curta |
 | A08 Software and Data Integrity Failures | `main` protegida, PR e CI obrigatórios; CD só a partir da `main`; imagem identificada pelo SHA |
-| A09 Security Logging and Monitoring Failures | Log estruturado com `request_id`; eventos de domínio; eventos do Keycloak |
+| A09 Security Logging and Monitoring Failures | Log estruturado com `request_id`; respostas 5xx em nível `ERROR`; eventos de domínio; eventos do Keycloak; métricas Prometheus em `/metrics` com alertas propostos ([12-observabilidade.md](12-observabilidade.md)) |
 | A10 Server-Side Request Forgery | A API não faz requisições a URLs fornecidas pelo usuário; a única chamada de saída é ao JWKS, com URL fixa por configuração |
 
 ### 4.2 OWASP API Security Top 10:2023 (riscos específicos de API)
@@ -123,7 +125,7 @@ No ambiente local, a comunicação é HTTP em `localhost` e o Keycloak roda em `
 | API1 Broken Object Level Authorization | Filtro por dono em `GET /api/v1/vendas/{id}` e `POST /api/v1/vendas/{id}/cancelar` |
 | API2 Broken Authentication | Seção 3.1 |
 | API3 Broken Object Property Level Authorization | Schemas de entrada fechados (campos desconhecidos → 422; `status` e `versao` não editáveis); `comprador_id` só para gestor |
-| API4 Unrestricted Resource Consumption | Paginação limitada; HPA; rate limiting como evolução |
+| API4 Unrestricted Resource Consumption | Paginação limitada (`limite` ≤ 100, `deslocamento` ≤ 1.000.000, acima disso 422); HPA; rate limiting na borda como evolução ([ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md)) |
 | API5 Broken Function Level Authorization | Papel exigido declarado em cada rota; testes de 401/403 por rota |
 | API6 Unrestricted Access to Sensitive Business Flows | Reserva expira em 30 min; limite de reservas por comprador como evolução |
 | API8 Security Misconfiguration | Ver A05 |
@@ -198,6 +200,15 @@ Quando o titular pede a exclusão:
 3. A conservação do histórico de vendas se apoia no **art. 16, I** (cumprimento de obrigação legal ou regulatória pelo controlador), por exemplo, a guarda de registros fiscais e contábeis pelos prazos decadenciais e prescricionais tributários. Os dados de identificação exigidos por essas obrigações (como o CPF que consta em documento fiscal) seriam mantidos pelo sistema fiscal da revenda, que está fora do escopo desta API, sob a mesma base legal e com prazo de retenção definido.
 4. Se houver venda `AGUARDANDO_PAGAMENTO` no momento da exclusão, ela expira normalmente (30 min) e o veículo volta à vitrine.
 
-### 5.7 Outras obrigações (fora do escopo técnico)
+### 5.7 Acesso operacional aos dados do comprador (nota fiscal e transferência)
+
+A separação não impede a operação da loja. Para emitir a nota fiscal ou preparar a transferência do veículo, a loja precisa do nome e do CPF do comprador de uma venda efetivada:
+
+1. O gestor consulta a venda (`GET /api/v1/vendas/{id}` ou `GET /api/v1/vendas?status=EFETIVADA`) e obtém o `comprador_id`, que é o `sub` do comprador.
+2. Um operador com papel administrativo no realm `revenda` (no ambiente local, o admin do console; em produção, um usuário com papel restrito de consulta de usuários, como `view-users` do client `realm-management`) abre o console do Keycloak e consulta o usuário por esse identificador (*Users* > busca pelo ID), onde estão nome, e-mail, CPF e telefone.
+
+Os dados ficam **separados, mas operáveis**: a reidentificação exige uma segunda credencial, de outro sistema, concedida só a quem precisa dela, e as ações administrativas ficam registradas nos eventos de administração do Keycloak, habilitados no realm (acesso restrito e auditável). A API, o banco transacional e os logs continuam sem dado pessoal. Uma evolução é um endpoint interno de "dados para faturamento" no próprio contexto Identidade, chamado pelo sistema fiscal com credencial de serviço, em vez de consulta manual.
+
+### 5.8 Outras obrigações (fora do escopo técnico)
 
 Registro das operações de tratamento (art. 37), indicação do encarregado (art. 41), política de privacidade e comunicação de incidentes à ANPD e aos titulares (art. 48) são obrigações organizacionais da revenda. A arquitetura facilita o cumprimento delas: o inventário de dados da seção 5.1 serve de base para o registro das operações, e a segregação física reduz o escopo de um eventual incidente.

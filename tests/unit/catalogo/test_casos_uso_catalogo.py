@@ -154,3 +154,28 @@ def test_adaptador_catalogo(repo: VeiculoRepoMemoria, uow: UowFalsa, relogio: Re
         "VeiculoReservado",
         "VeiculoLiberado",
     ]
+
+
+def test_editar_sem_mudanca_real_nao_grava_nem_publica(
+    repo: VeiculoRepoMemoria, uow: UowFalsa, relogio: RelogioFixo
+) -> None:
+    veiculo = cadastrar(repo, uow, relogio, "95000.00")
+    confirmacoes = uow.confirmacoes
+    relogio.avancar(timedelta(minutes=1))
+    resultado = EditarVeiculo(repo, uow, relogio).executar(
+        veiculo.id, DadosEdicao(preco=Decimal("95000"), marca="Fiat")
+    )
+    assert resultado.versao == 1
+    assert resultado.atualizado_em == AGORA
+    assert uow.confirmacoes == confirmacoes
+    assert uow.nomes_publicados == ["VeiculoCadastrado"]
+    assert repo.dados[veiculo.id].versao == 1
+
+
+def test_obter_aciona_a_expiracao_antes_de_ler(
+    repo: VeiculoRepoMemoria, uow: UowFalsa, relogio: RelogioFixo
+) -> None:
+    veiculo = cadastrar(repo, uow, relogio, "1.00")
+    expirador = ExpiradorEspiao()
+    assert ObterVeiculo(repo, expirador).executar(veiculo.id).id == veiculo.id
+    assert expirador.chamadas == [100]

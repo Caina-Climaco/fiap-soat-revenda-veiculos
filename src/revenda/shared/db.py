@@ -25,6 +25,9 @@ def criar_engine(url: str | URL, *, pool_size: int = 5, max_overflow: int = 5) -
     return create_engine(
         url,
         pool_pre_ping=True,
+        # Erros do banco (ex.: DataError) não levam os valores dos parâmetros para a
+        # mensagem da exceção nem, portanto, para o log de erro 500.
+        hide_parameters=True,
         pool_size=pool_size,
         max_overflow=max_overflow,
         # Readiness probe precisa falhar rápido quando o banco está fora. A sessão em UTC

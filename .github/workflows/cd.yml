@@ -55,6 +55,25 @@ jobs:
           ref: ${{ inputs.ref || github.sha }}
           clean: true
           persist-credentials: false
+          # Historico completo: a validacao abaixo precisa da ancestralidade ate a main.
+          fetch-depth: 0
+
+      # Disparo manual so implanta commits que ja estao na main (revisados por PR e com CI
+      # verde). Vale para qualquer workflow_dispatch: com `ref` informado ou vazio, ja que
+      # o disparo manual tambem pode ser feito "a partir de" outra branch.
+      - name: Valida que o commit pertence a main (workflow_dispatch)
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        env:
+          REF_SOLICITADA: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          SHA="$(git rev-parse HEAD)"
+          git fetch --no-tags origin +refs/heads/main:refs/remotes/origin/main
+          if ! git merge-base --is-ancestor "$SHA" origin/main; then
+            echo "::error::O commit ${SHA} (ref solicitada: '${REF_SOLICITADA:-}', branch do disparo: '${GITHUB_REF_NAME}') nao pertence ao historico da main. O CD so implanta commits ja mergeados na main."
+            exit 1
+          fi
+          echo "OK: ${SHA} pertence ao historico da main."
 
       - name: Contexto (SHA, diretorios, kubeconfig)
         env:

@@ -24,10 +24,12 @@ from revenda.catalogo.application.casos_uso import (
     ListarVendidos,
     ObterVeiculo,
 )
+from revenda.catalogo.domain.eventos import VeiculoCadastrado
 from revenda.catalogo.infrastructure.repositorio_sql import SqlVeiculoRepository
 from revenda.shared.clock import Clock
 from revenda.shared.db import BancoDeDados, SqlUnidadeDeTrabalho
-from revenda.shared.eventos import PublicadorEventos
+from revenda.shared.eventos import EventoDominio, PublicadorEventos
+from revenda.shared.metricas import AcaoMetrica, Metricas, rotulo_do_evento
 from revenda.vendas.application.casos_uso import (
     CancelarVenda,
     CasosUsoVendas,
@@ -38,6 +40,8 @@ from revenda.vendas.application.casos_uso import (
     ProcessarPagamento,
 )
 from revenda.vendas.application.portas import CatalogoPort
+from revenda.vendas.domain.eventos import CompraIniciada, VendaCancelada, VendaEfetivada
+from revenda.vendas.domain.venda import MotivoCancelamento
 from revenda.vendas.infrastructure.repositorio_sql import SqlVendaRepository
 
 
@@ -76,11 +80,12 @@ class Composicao:
     def casos_uso_catalogo(self, sessao: Session) -> CasosUsoCatalogo:
         uow = SqlUnidadeDeTrabalho(sessao, self._publicador)
         repo = SqlVeiculoRepository(sessao)
+        expirador = self._expirador(sessao, uow, repo)
         return CasosUsoCatalogo(
             cadastrar=CadastrarVeiculo(repo, uow, self._relogio),
             editar=EditarVeiculo(repo, uow, self._relogio),
-            obter=ObterVeiculo(repo),
-            listar_a_venda=ListarAVenda(repo, self._expirador(sessao, uow, repo)),
+            obter=ObterVeiculo(repo, expirador),
+            listar_a_venda=ListarAVenda(repo, expirador),
             listar_vendidos=ListarVendidos(repo),
         )
 
@@ -88,12 +93,13 @@ class Composicao:
         uow = SqlUnidadeDeTrabalho(sessao, self._publicador)
         repo = SqlVendaRepository(sessao)
         catalogo: CatalogoPort = CatalogoAdapter(SqlVeiculoRepository(sessao), uow)
+        expirador = ExpirarReservasVencidas(repo, catalogo, uow, self._relogio)
         return CasosUsoVendas(
             iniciar_compra=IniciarCompra(repo, catalogo, uow, self._relogio, ttl_reserva=self._ttl),
             processar_pagamento=ProcessarPagamento(repo, catalogo, uow, self._relogio),
             cancelar=CancelarVenda(repo, catalogo, uow, self._relogio),
-            obter=ObterVenda(repo),
-            listar=ListarVendas(repo),
+            obter=ObterVenda(repo, expirador),
+            listar=ListarVendas(repo, expirador),
         )
 
     def _expirador(
@@ -101,3 +107,23 @@ class Composicao:
     ) -> ExpirarReservasVencidas:
         catalogo: CatalogoPort = CatalogoAdapter(repo, uow)
         return ExpirarReservasVencidas(SqlVendaRepository(sessao), catalogo, uow, self._relogio)
+
+
+def acoes_metricas_negocio(metricas: Metricas) -> dict[str, AcaoMetrica]:
+    """Liga os eventos de domínio (já confirmados) aos contadores de negócio.
+
+    Fica aqui, e não em `shared/metricas.py`, porque só a composição conhece os eventos
+    dos dois módulos; o domínio continua sem saber que existem métricas.
+    """
+    for motivo in MotivoCancelamento:  # séries com zero desde o início (rate() sem lacunas)
+        metricas.vendas_canceladas.labels(motivo=motivo.value)
+
+    def cancelada(evento: EventoDominio) -> None:
+        metricas.vendas_canceladas.labels(motivo=rotulo_do_evento(evento, "motivo")).inc()
+
+    return {
+        VeiculoCadastrado.NOME: lambda _evento: metricas.veiculos_cadastrados.inc(),
+        CompraIniciada.NOME: lambda _evento: metricas.vendas_iniciadas.inc(),
+        VendaEfetivada.NOME: lambda _evento: metricas.vendas_efetivadas.inc(),
+        VendaCancelada.NOME: cancelada,
+    }

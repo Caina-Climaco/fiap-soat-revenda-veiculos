@@ -158,3 +158,38 @@ def test_transicoes_invalidas_a_partir_de_a_venda(
 
 def test_validar_dados_ignora_campos_ausentes() -> None:
     assert validar_dados(ano_corrente=2026).informados() == {}
+
+
+@pytest.mark.parametrize("campo", ["marca", "modelo", "cor"])
+@pytest.mark.parametrize(
+    "valor",
+    ["a\x00b", "a\x1fb", "a\tb", "a\nb", "Fiat\n", "\x1cFiat", "a\x7fb"],
+    ids=["nul", "us", "tab", "lf-meio", "lf-fim", "fs-inicio", "del"],
+)
+def test_caracteres_de_controle_sao_recusados(campo: str, valor: str) -> None:
+    # Antes, um NUL chegava ao PostgreSQL e virava 500; strip() escondia \x1c-\x1f nas pontas.
+    with pytest.raises(DadosVeiculoInvalidosError) as erro:
+        novo(**{campo: valor})
+    assert erro.value.erros == [(campo, "não pode conter caracteres de controle")]
+    with pytest.raises(DadosVeiculoInvalidosError):
+        novo().editar(agora=AGORA, **{campo: valor})
+
+
+def test_acentos_e_espacos_internos_continuam_validos() -> None:
+    veiculo = novo(marca="Citroën", modelo="C4 Cactus Feel 1.6", cor="Azul Côte d'Azur")
+    assert veiculo.marca == "Citroën"
+
+
+def test_edicao_sem_mudanca_real_nao_gera_versao_nem_evento() -> None:
+    veiculo = novo()
+    veiculo.coletar_eventos()
+    depois = AGORA + timedelta(minutes=5)
+    alterou = veiculo.editar(agora=depois, preco="124900", cor=" Prata ", ano=2022)
+    assert alterou is False
+    assert veiculo.versao == 1
+    assert veiculo.atualizado_em == AGORA
+    assert veiculo.coletar_eventos() == []
+    # Com ao menos um valor diferente, só os campos realmente alterados entram no evento.
+    assert veiculo.editar(agora=depois, preco="124900.00", cor="Preto") is True
+    assert veiculo.versao == 2
+    assert veiculo.coletar_eventos()[-1].como_dict()["campos"] == "cor"

@@ -11,7 +11,7 @@ from fastapi import Query
 from pydantic import BaseModel, ConfigDict, PlainSerializer, WithJsonSchema
 
 from revenda.shared.errors import MEDIA_TYPE_PROBLEMA
-from revenda.shared.paginacao import LIMITE_MAXIMO, LIMITE_PADRAO
+from revenda.shared.paginacao import DESLOCAMENTO_MAXIMO, LIMITE_MAXIMO, LIMITE_PADRAO
 
 _DESCRICOES_STATUS = {
     400: "Requisição malformada (JSON inválido)",
@@ -97,6 +97,13 @@ def paginacao(
     limite: Annotated[
         int, Query(ge=1, le=LIMITE_MAXIMO, description="Itens por página (1 a 100).")
     ] = LIMITE_PADRAO,
-    deslocamento: Annotated[int, Query(ge=0, description="Quantidade de itens a pular.")] = 0,
+    deslocamento: Annotated[
+        int,
+        Query(
+            ge=0,
+            le=DESLOCAMENTO_MAXIMO,
+            description="Quantidade de itens a pular (0 a 1.000.000).",
+        ),
+    ] = 0,
 ) -> ParametrosPaginacao:
     return ParametrosPaginacao(limite=limite, deslocamento=deslocamento)

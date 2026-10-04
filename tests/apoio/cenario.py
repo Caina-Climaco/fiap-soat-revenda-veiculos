@@ -65,10 +65,11 @@ class Cenario:
         return ExpirarReservasVencidas(self.vendas, self.catalogo, self.uow, self.relogio)
 
     def obter(self) -> ObterVenda:
-        return ObterVenda(self.vendas)
+        # Ligado ao expirador, como na composição da aplicação.
+        return ObterVenda(self.vendas, self.expirar())
 
     def listar(self) -> ListarVendas:
-        return ListarVendas(self.vendas)
+        return ListarVendas(self.vendas, self.expirar())
 
 
 def novo_cenario() -> Cenario:

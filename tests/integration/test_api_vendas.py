@@ -358,3 +358,40 @@ def test_cancelamento_negado(api: Api, veiculo: dict[str, Any], relogio: Relogio
     resposta = api.http.post(f"/api/v1/vendas/{vencida['id']}/cancelar", headers=dono)
     assert resposta.status_code == 200
     assert resposta.json()["motivo_cancelamento"] == "RESERVA_EXPIRADA"
+
+
+def test_leituras_aplicam_a_expiracao_antes_de_consultar(
+    api: Api, veiculo: dict[str, Any], relogio: RelogioFixo
+) -> None:
+    """Nenhuma leitura mostra reserva vencida como ativa (relógio fixo, TTL de 30 min)."""
+    cliente = api.novo_cliente("cliente-leitura")
+    compra = api.compra_ok(veiculo["id"], cliente)
+    relogio.avancar(timedelta(minutes=29))
+    assert api.veiculo(veiculo["id"])["status"] == "RESERVADO"
+    relogio.avancar(timedelta(minutes=1))  # 10:30: venceu
+
+    # 1) consulta do veículo: a reserva vencida é cancelada antes da leitura
+    assert api.veiculo(veiculo["id"])["status"] == "A_VENDA"
+    venda = api.venda(compra["id"], cliente).json()
+    assert (venda["status"], venda["motivo_cancelamento"]) == ("CANCELADA", "RESERVA_EXPIRADA")
+
+
+@pytest.mark.parametrize("leitura", ["venda", "minhas", "gestor"])
+def test_cada_leitura_de_vendas_expira_sozinha(
+    api: Api, veiculo: dict[str, Any], relogio: RelogioFixo, leitura: str
+) -> None:
+    cliente = api.novo_cliente("cliente-leitura")
+    compra = api.compra_ok(veiculo["id"], cliente)
+    relogio.avancar(timedelta(minutes=31))
+    if leitura == "venda":
+        vista = api.venda(compra["id"], cliente).json()
+    elif leitura == "minhas":
+        vista = api.http.get("/api/v1/vendas/minhas", headers=cliente).json()["itens"][0]
+    else:
+        vista = api.vendas_do_gestor(status="AGUARDANDO_PAGAMENTO")
+        assert vista["total"] == 0
+        vista = api.vendas_do_gestor()["itens"][0]
+    assert (vista["status"], vista["motivo_cancelamento"]) == ("CANCELADA", "RESERVA_EXPIRADA")
+    assert vista["cancelada_em"] == "2026-10-03T10:31:00Z"
+    # o veículo foi liberado na mesma transação da leitura
+    assert api.a_venda()["itens"][0]["id"] == veiculo["id"]

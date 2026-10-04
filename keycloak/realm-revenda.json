@@ -247,12 +247,12 @@
       "defaultClientScopes": [
         "basic",
         "roles",
-        "profile",
-        "email",
         "web-origins",
         "acr"
       ],
       "optionalClientScopes": [
+        "profile",
+        "email",
         "offline_access"
       ]
     },
@@ -291,12 +291,13 @@
       "defaultClientScopes": [
         "basic",
         "roles",
-        "profile",
-        "email",
         "web-origins",
         "acr"
       ],
-      "optionalClientScopes": []
+      "optionalClientScopes": [
+        "profile",
+        "email"
+      ]
     }
   ],
   "users": [

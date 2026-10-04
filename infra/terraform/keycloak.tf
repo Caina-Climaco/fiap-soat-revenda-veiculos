@@ -2,8 +2,8 @@
 # Realm "revenda" importado na inicializacao (--import-realm) a partir de
 # keycloak/realm-revenda.json, montado por ConfigMap em /opt/keycloak/data/import.
 #
-# Import na inicializacao (Keycloak 26.4, conferido na documentacao "Importing and
-# exporting realms" e no codigo-fonte da tag 26.4.16):
+# Import na inicializacao (Keycloak 26.7, imagem 26.7.1; conferido na documentacao "Importing and
+# exporting realms" e no codigo-fonte da tag 26.7.1):
 # - estrategia IGNORE_EXISTING: o realm so e criado na PRIMEIRA subida; mudancas
 #   posteriores no JSON nao sao reaplicadas enquanto o realm existir no keycloak-db;
 # - placeholders ${VAR} sao substituidos no TEXTO do arquivo pelas variaveis de ambiente
@@ -256,7 +256,8 @@ resource "kubernetes_service_v1" "keycloak" {
 }
 
 # Reconcilia o usuario gestor.loja com o Secret keycloak-gestor (idempotente):
-# cria o usuario se nao existir, define a senha (nao temporaria) e garante o papel gestor.
+# cria o usuario se nao existir, define a senha (nao temporaria), garante o papel gestor e
+# remove os papeis padrao de cliente (default-roles-revenda e cliente).
 # Necessario porque o import do realm e IGNORE_EXISTING: sem este Job, uma rotacao da
 # senha (terraform apply -replace=random_password.keycloak_gestor) ou um state recriado
 # com o keycloak-db preservado deixariam o Secret divergente da senha real.
@@ -330,6 +331,16 @@ resource "kubernetes_job_v1" "keycloak_gestor_senha" {
             fi
             KC_CLI_PASSWORD="$GESTOR_PASSWORD" "$KCADM" set-password --config "$CFG" -r "$REALM" --username "$USUARIO"
             "$KCADM" add-roles --config "$CFG" -r "$REALM" --uusername "$USUARIO" --rolename gestor
+            # Usuario criado pela Admin API recebe default-roles-revenda (composite com
+            # cliente). O gestor fica so com o papel gestor, igual ao import do realm.
+            # Idempotente: a remocao de um papel que o usuario nao tem e ignorada.
+            for papel in default-roles-revenda cliente; do
+              if "$KCADM" remove-roles --config "$CFG" -r "$REALM" --uusername "$USUARIO" --rolename "$papel" 2>/dev/null; then
+                echo "Papel $papel removido (ou ja ausente) de $USUARIO"
+              else
+                echo "Papel $papel nao estava atribuido a $USUARIO: ignorado"
+              fi
+            done
             echo "Usuario $USUARIO reconciliado com o Secret keycloak-gestor"
           EOT
           ]

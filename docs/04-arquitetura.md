@@ -66,13 +66,13 @@ C4Container
   System_Ext(gateway, "Gateway de Pagamento", "Simulado via Swagger ou curl")
 
   Boundary(ns_revenda, "Namespace revenda", "Kubernetes") {
-    Container(api, "revenda-api", "Python 3.12, FastAPI, SQLAlchemy 2", "Módulos Catálogo e Vendas; OpenAPI e Swagger UI em /docs")
+    Container(api, "revenda-api", "Python 3.12, FastAPI, SQLAlchemy 2", "Módulos Catálogo e Vendas; Swagger UI em /docs; métricas em /metrics")
     ContainerDb(dbapi, "PostgreSQL revenda", "PostgreSQL 16, StatefulSet", "Schemas catalogo e vendas; sem dados pessoais")
     Container(mig, "Job de migração", "Alembic", "Aplica migrações antes de cada rollout")
   }
 
   Boundary(ns_ident, "Namespace identidade", "Kubernetes") {
-    Container(kc, "Keycloak", "Keycloak 26, realm revenda", "Cadastro, login, papéis cliente e gestor, emissão de JWT")
+    Container(kc, "Keycloak", "Keycloak 26.7.1, realm revenda", "Cadastro, login, papéis cliente e gestor, emissão de JWT")
     ContainerDb(dbkc, "PostgreSQL keycloak", "PostgreSQL 16, StatefulSet", "Usuários, credenciais, atributos pessoais")
   }
 
@@ -88,11 +88,11 @@ C4Container
 
 | Container | Tecnologia | Exposição |
 |---|---|---|
-| `revenda-api` | Imagem `revenda-api:<sha>`, Uvicorn na porta 8000 | Service NodePort 30080 → host 8080 |
-| Job de migração | Mesma imagem, comando `alembic upgrade head` | Não exposto |
-| PostgreSQL `revenda` | `postgres:16-alpine`, PVC | Service `revenda-db:5432`; NodePort 30432 → host `15432` apenas para a demonstração (variável `expor_banco_revenda`) |
-| Keycloak | `quay.io/keycloak/keycloak:26.x`, `start-dev --import-realm` | Service NodePort 30180 → host 8180 |
-| PostgreSQL `keycloak` | `postgres:16-alpine`, PVC | Service ClusterIP `keycloak-db:5432` (não exposto) |
+| `revenda-api` | Imagem `revenda-api:<sha>`, Uvicorn na porta 8000 | Service NodePort 30080 → host 8080; `/metrics` na mesma porta, com anotações `prometheus.io/*` no pod |
+| Job de migração | Mesma imagem, comando `python -m revenda.migracao` (`alembic upgrade head`, mas sem efeito quando o banco está numa revisão mais nova que a imagem, caso de rollback) | Não exposto |
+| PostgreSQL `revenda` | `postgres:16.15-alpine`, PVC | Service `revenda-db:5432`, NodePort 30432 → host `127.0.0.1:15432` por padrão, para a demonstração (`expor_banco_revenda = false` o torna ClusterIP) |
+| Keycloak | `quay.io/keycloak/keycloak:26.7.1`, `start-dev --import-realm`, *limit* de memória 1536Mi | Service NodePort 30180 → host 8180 |
+| PostgreSQL `keycloak` | `postgres:16.15-alpine`, PVC | Service ClusterIP `keycloak-db:5432` (não exposto) |
 
 ## 4. C4 nível 3 — Componentes da `revenda-api`
 
@@ -111,6 +111,7 @@ flowchart TB
       uow["db / UnitOfWork<br/>sessão SQLAlchemy"]
       errs["errors<br/>problem+json"]
       clock["clock"]
+      obs["middleware + metricas<br/>request_id, logs JSON,<br/>Prometheus /metrics"]
     end
 
     subgraph CAT["Módulo Catálogo"]
@@ -131,6 +132,7 @@ flowchart TB
     end
   end
 
+  prom(["Prometheus / APM<br/>evolução"])
   cliente -->|"HTTP JSON + Bearer"| cat_if
   cliente -->|"HTTP JSON + Bearer"| ven_if
   gw -->|"X-Webhook-Secret"| acl
@@ -148,6 +150,7 @@ flowchart TB
   cat_inf --> uow
   ven_inf --> uow
   uow --> db
+  prom -.->|"scrape GET /metrics"| obs
 ```
 
 | Componente | Responsabilidade |
@@ -156,6 +159,7 @@ flowchart TB
 | `shared/db` | Engine, `sessionmaker` e a `UnitOfWork` que delimita a transação por requisição de escrita |
 | `shared/errors` | Mapeia exceções de domínio e de aplicação para `application/problem+json` (RFC 9457) |
 | `shared/clock` | Relógio injetável (UTC); substituído por relógio fixo nos testes |
+| Middleware e métricas (`shared`) | Gera ou propaga o `X-Request-ID`, registra cada requisição em log JSON (rota, status, latência, sem dados pessoais) e alimenta as métricas Prometheus expostas em `GET /metrics`: histograma de latência e contador de requisições por método, rota template e status, e contadores de negócio (vendas iniciadas, efetivadas e canceladas por motivo; veículos cadastrados). Detalhes em [12-observabilidade.md](12-observabilidade.md) e [ADR-012](adrs/ADR-012-observabilidade-prometheus.md) |
 | `CatalogoPort` | Porta **definida por Vendas** (consumidor) com as operações de que Vendas precisa: `reservar`, `liberar`, `marcar_vendido`. Vendas não importa nada de `catalogo.domain` |
 | `CatalogoAdapter` | Implementação in-process da porta, no módulo Catálogo; executa as transições do agregado `Veiculo` usando a mesma sessão (Unit of Work) |
 | ACL do webhook | Valida o segredo, traduz `{"codigo_pagamento", "status"}` (`APROVADO` ou `RECUSADO`) em `ProcessarPagamento(codigo, aprovado: bool)`; isola o vocabulário do gateway do modelo de Vendas |
@@ -178,11 +182,11 @@ flowchart LR
 
     subgraph KIND["Cluster kind revenda (container Docker do nó control-plane)"]
       subgraph NSR["namespace revenda"]
-        dep["Deployment revenda-api<br/>2..5 pods (HPA, CPU 60%)"]
+        dep["Deployment revenda-api<br/>2..5 pods (HPA, CPU 60%)<br/>anotações prometheus.io/scrape"]
         svcapi["Service revenda-api<br/>NodePort 30080"]
-        job["Job revenda-migracao<br/>alembic upgrade head"]
+        job["Job revenda-migracao<br/>python -m revenda.migracao"]
         stsapi[("StatefulSet revenda-db<br/>postgres:16-alpine + PVC")]
-        svcdb["Service revenda-db<br/>ClusterIP 5432"]
+        svcdb["Service revenda-db<br/>5432, NodePort 30432"]
       end
       subgraph NSI["namespace identidade"]
         kcdep["Deployment keycloak<br/>1 pod, start-dev"]
@@ -215,7 +219,8 @@ flowchart LR
 |---|---|
 | Mapeamento de portas | host `8080` → nodePort `30080` (API); host `8180` → nodePort `30180` (Keycloak). host `15432` → nodePort `30432` (banco da API, só para demonstração; desligável com `expor_banco_revenda=false`). O banco do Keycloak **não** é exposto |
 | Secrets (Terraform) | `revenda-db-credentials`, `revenda-webhook-secret` (ns `revenda`); `keycloak-db-credentials`, `keycloak-admin`, `keycloak-gestor` (ns `identidade`) |
-| NetworkPolicy | `revenda-db` só aceita tráfego de pods com o rótulo de acesso ao banco (API e Job de migração); `keycloak-db` só aceita do Keycloak |
+| NetworkPolicy | `revenda-db` só aceita pods com rótulo `app` igual a `revenda-api` ou `revenda-migracao` (mais o tráfego do NodePort de demonstração); `keycloak-db` só aceita `app=keycloak` |
+| Observabilidade | Logs JSON em stdout (`kubectl logs`); `GET /metrics` em cada pod, com anotações `prometheus.io/scrape`, `port` e `path` para um Prometheus que venha a ser instalado; metrics-server alimenta o HPA e o `kubectl top`. Não há Prometheus nem APM instalados no cluster nesta entrega ([12-observabilidade.md](12-observabilidade.md)) |
 | Emissor dos tokens | `KC_HOSTNAME=http://localhost:8180`, então `iss = http://localhost:8180/realms/revenda`. A API busca o JWKS pelo endereço interno do Service, mas valida o `iss` público (ver [07-seguranca-lgpd.md](07-seguranca-lgpd.md)) |
 
 ## 6. Diagramas de sequência
@@ -405,7 +410,7 @@ sequenceDiagram
   end
 ```
 
-Além desses gatilhos, a listagem `GET /api/v1/veiculos/a-venda` executa, antes da consulta, uma **varredura preguiçosa** limitada (até 100 vendas expiradas por chamada), para que veículos com reserva vencida voltem a aparecer na vitrine mesmo que ninguém tente comprá-los diretamente. O cancelamento e a liberação usam os mesmos UPDATEs condicionais, portanto são seguros sob concorrência e idempotentes.
+Além desses gatilhos, a listagem `GET /api/v1/veiculos/a-venda` executa, antes da consulta, uma **varredura preguiçosa** limitada (até 100 vendas expiradas por chamada), para que veículos com reserva vencida voltem a aparecer na vitrine mesmo que ninguém tente comprá-los diretamente. As demais leituras (`GET /api/v1/veiculos/{id}`, `GET /api/v1/vendas/{id}`, `GET /api/v1/vendas/minhas` e `GET /api/v1/vendas`) também aplicam a expiração antes de responder, para nenhuma leitura mostrar reserva vencida como ativa. O cancelamento e a liberação usam os mesmos UPDATEs condicionais, portanto são seguros sob concorrência e idempotentes.
 
 ## 7. Visão de baixo nível (LLD)
 

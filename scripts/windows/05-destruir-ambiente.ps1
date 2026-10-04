@@ -66,7 +66,7 @@ if (-not $Forcar) {
     }
 }
 
-# Mesmos caminhos do cd.yml e do 04-subir-ambiente.ps1
+# Mesmos caminhos do 04-subir-ambiente.ps1 (o cd.yml usa este state via /revenda-state)
 $perfil = $env:USERPROFILE -replace '\\', '/'
 $stateDir = "$perfil/.revenda"
 $statePath = "$stateDir/terraform.tfstate"

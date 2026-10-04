@@ -107,37 +107,62 @@ _MENSAGENS = {
     "extra_forbidden": "campo não permitido",
     "string_too_short": "deve ter ao menos {min_length} caractere(s)",
     "string_too_long": "deve ter no máximo {max_length} caracteres",
+    "string_type": "deve ser texto",
+    "string_unicode": "deve ser texto Unicode válido",
+    "string_pattern_mismatch": "formato inválido",
     "greater_than": "deve ser maior que {gt}",
     "greater_than_equal": "deve ser maior ou igual a {ge}",
+    "less_than": "deve ser menor que {lt}",
     "less_than_equal": "deve ser menor ou igual a {le}",
     "decimal_max_places": "deve ter no máximo {decimal_places} casas decimais",
     "decimal_max_digits": "deve ter no máximo {max_digits} dígitos",
     "decimal_whole_digits": "deve ter no máximo {whole_digits} dígitos inteiros",
     "decimal_parsing": "deve ser um número decimal",
+    "decimal_type": 'deve ser um número decimal (de preferência string, ex.: "79900.00")',
+    "finite_number": "deve ser um número finito",
+    "float_parsing": "deve ser um número",
+    "float_type": "deve ser um número",
     "int_parsing": "deve ser um número inteiro",
+    "int_parsing_size": "número inteiro fora do intervalo permitido",
     "int_type": "deve ser um número inteiro",
     "int_from_float": "deve ser um número inteiro",
-    "string_type": "deve ser texto",
+    "bool_type": "deve ser verdadeiro ou falso",
+    "bool_parsing": "deve ser verdadeiro ou falso",
     "uuid_parsing": "deve ser um UUID válido",
     "uuid_type": "deve ser um UUID válido",
+    "uuid_version": "deve ser um UUID válido",
     "enum": "deve ser um de: {expected}",
     "literal_error": "deve ser um de: {expected}",
-    "string_pattern_mismatch": "formato inválido",
+    "model_type": "deve ser um objeto JSON",
     "model_attributes_type": "deve ser um objeto JSON",
     "dict_type": "deve ser um objeto JSON",
+    "too_short": "deve ter ao menos {min_length} item(ns)",
+    "too_long": "deve ter no máximo {max_length} item(ns)",
+    "list_type": "deve ser uma lista",
+    "json_type": "deve ser JSON",
+    "json_invalid": "JSON inválido",
 }
+# Erros de validadores próprios (mensagem já em português, prefixada por "Value error, ").
+_TIPOS_COM_MENSAGEM_PROPRIA = frozenset({"value_error"})
+_MENSAGEM_GENERICA = "valor inválido"
 
 
 def _mensagem(erro: Mapping[str, Any]) -> str:
-    modelo = _MENSAGENS.get(str(erro.get("type")))
+    tipo = str(erro.get("type"))
+    modelo = _MENSAGENS.get(tipo)
     if modelo is not None:
+        contexto = dict(erro.get("ctx") or {})
+        if "expected" in contexto:
+            # O pydantic enumera as opções em inglês: "'A', 'B' or 'C'".
+            contexto["expected"] = str(contexto["expected"]).replace(" or ", " ou ")
         try:
-            return modelo.format(**(erro.get("ctx") or {}))
+            return modelo.format(**contexto)
         except (KeyError, IndexError):
-            pass
-    mensagem = str(erro.get("msg", "valor inválido"))
-    # Erros de validadores próprios chegam como "Value error, <mensagem>".
-    return mensagem.removeprefix("Value error, ")
+            return _MENSAGEM_GENERICA
+    if tipo in _TIPOS_COM_MENSAGEM_PROPRIA:
+        return str(erro.get("msg", _MENSAGEM_GENERICA)).removeprefix("Value error, ")
+    # Tipo de erro do pydantic sem tradução: nunca devolver a mensagem em inglês.
+    return _MENSAGEM_GENERICA
 
 
 def _campo(loc: Sequence[Any]) -> str:
@@ -187,11 +212,22 @@ async def _tratar_erro_http(request: Request, exc: Exception) -> JSONResponse:
     return resposta_problema(request, exc.tipo, exc.detalhe, headers=exc.headers)
 
 
-async def _tratar_inesperado(request: Request, exc: Exception) -> JSONResponse:
-    _logger.error("erro inesperado", exc_info=exc)
+def responder_erro_inesperado(request: Request, exc: BaseException) -> JSONResponse:
+    """Registra o erro (uma única vez, com stack trace) e devolve o 500 sem detalhes internos.
+
+    Chamado pelo `CorrelacaoMiddleware`, que captura a exceção antes do
+    `ServerErrorMiddleware` do Starlette: assim ela não é relançada para o uvicorn, que
+    registraria o mesmo stack trace de novo em `uvicorn.error`.
+    """
+    _logger.error("erro inesperado: %s", type(exc).__name__, exc_info=exc)
     return resposta_problema(
         request, ERRO_INTERNO, "Ocorreu um erro inesperado. Informe o request_id ao suporte."
     )
+
+
+async def _tratar_inesperado(request: Request, exc: Exception) -> JSONResponse:
+    # Rede de segurança para falhas fora do CorrelacaoMiddleware (ex.: no próprio middleware).
+    return responder_erro_inesperado(request, exc)
 
 
 def registrar_problemas(app: FastAPI, mapeamento: Mapping[type[Exception], TipoProblema]) -> None:
