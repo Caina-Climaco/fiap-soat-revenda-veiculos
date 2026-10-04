@@ -228,6 +228,22 @@ jobs:
             echo "::endgroup::"
           done
 
+      - name: Cluster kind (infra/kind/cluster.yaml valido e portas do contrato)
+        run: |
+          set -euo pipefail
+          arquivo=infra/kind/cluster.yaml
+          # yq (mikefarah) vem na imagem ubuntu-latest; falha se o YAML for invalido
+          yq -e '.kind == "Cluster" and .name == "revenda"' "$arquivo" >/dev/null \
+            || { echo "::error file=${arquivo}::YAML invalido ou sem kind: Cluster / name: revenda"; exit 1; }
+          for par in 30080:8080 30180:8180 30432:15432; do
+            c="${par%%:*}"; h="${par##*:}"
+            yq -e "[.nodes[].extraPortMappings[] | select(.containerPort == ${c} and .hostPort == ${h})] | length == 1" "$arquivo" >/dev/null \
+              || { echo "::error file=${arquivo}::extraPortMapping ${c} -> ${h} ausente"; exit 1; }
+          done
+          yq -e '.nodes[0].image | test("^kindest/node:v[0-9.]+@sha256:[0-9a-f]{64}$")' "$arquivo" >/dev/null \
+            || { echo "::error file=${arquivo}::imagem do no deve ser fixada por digest"; exit 1; }
+          echo "Config do kind OK"
+
       - name: Realm do Keycloak (JSON valido e contrato minimo)
         run: |
           set -euo pipefail

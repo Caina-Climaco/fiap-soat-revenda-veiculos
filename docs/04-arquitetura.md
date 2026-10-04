@@ -23,7 +23,7 @@ O Gateway de Pagamento é um sistema externo **simulado**; ele notifica o result
 |---|---|---|---|
 | 1 | **Segurança e privacidade** | Um invasor com acesso somente leitura ao banco da API não obtém nome, e-mail, CPF ou telefone de nenhum cliente | Identidade apartada (instância de banco distinta); `comprador_id` = `sub` (pseudônimo); JWT RS256 validado; RBAC; segredos fora do Git |
 | 2 | **Consistência / integridade** | Dois clientes que compram o mesmo veículo no mesmo instante: exatamente um recebe 201, o outro 409 | UPDATE condicional, índice único parcial, transação única (Unit of Work) ([ADR-008](adrs/ADR-008-concorrencia-update-condicional.md)) |
-| 3 | **Implantabilidade** | Um PR mergeado na `main` chega ao cluster sem passo manual, com migração aplicada e teste e2e verde | Terraform + kustomize + CD self-hosted + Job de migração ([08-ci-cd-infra.md](08-ci-cd-infra.md)) |
+| 3 | **Implantabilidade** | Um PR mergeado na `main` chega ao cluster sem passo manual, com migração aplicada e teste e2e verde | CLI kind + Terraform + kustomize + CD self-hosted + Job de migração ([08-ci-cd-infra.md](08-ci-cd-infra.md)) |
 | 4 | **Testabilidade** | Regras de domínio testáveis sem banco, sem rede e com relógio controlado | Clean Architecture, portas e adaptadores, `Clock` injetável ([09-testes.md](09-testes.md)) |
 | 5 | **Manutenibilidade / evolutividade** | Extrair Vendas para um serviço próprio sem reescrever o domínio | Dependência de Vendas em Catálogo apenas pela porta `CatalogoPort`; schemas separados |
 | 6 | **Disponibilidade (local)** | A queda de uma réplica da API não interrompe as requisições | 2 réplicas, readiness probe, HPA 2..5 |
@@ -162,7 +162,7 @@ flowchart TB
 
 ## 5. Visão de implantação
 
-O ambiente é um cluster **kind** de um nó (control-plane) criado pelo Terraform no PC do autor, que também hospeda o runner self-hosted do GitHub Actions. Não há Ingress: os serviços são publicados por **NodePort** mapeados para portas do host via `extraPortMappings` do kind ([ADR-005](adrs/ADR-005-kind-terraform-nodeport.md)).
+O ambiente é um cluster **kind** de um nó (control-plane) criado pela CLI `kind` (a partir de `infra/kind/cluster.yaml`) no PC do autor, com todo o conteúdo do cluster gerenciado pelo Terraform, que também hospeda o runner self-hosted do GitHub Actions. Não há Ingress: os serviços são publicados por **NodePort** mapeados para portas do host via `extraPortMappings` do kind ([ADR-005](adrs/ADR-005-kind-terraform-nodeport.md)).
 
 ```mermaid
 flowchart LR
@@ -198,7 +198,7 @@ flowchart LR
 
   repo -->|"pull_request / push"| ci
   repo -->|"push na main: job de CD"| runner
-  runner -->|"terraform apply"| KIND
+  runner -->|"kind create cluster (se faltar) + terraform apply"| KIND
   runner --- tfstate
   runner -->|"kind load + kubectl apply"| NSR
   browser -->|"localhost:8080"| svcapi

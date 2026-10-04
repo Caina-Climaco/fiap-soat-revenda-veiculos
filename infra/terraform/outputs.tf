@@ -4,10 +4,10 @@
 output "cluster" {
   description = "Nome do cluster kind e contexto do kubectl."
   value = {
-    nome            = kind_cluster.revenda.name
-    contexto        = "kind-${kind_cluster.revenda.name}"
+    nome            = var.cluster_nome
+    contexto        = local.kube_contexto
     kubeconfig_path = local.kubeconfig_path
-    node_image      = var.kind_node_image
+    config_kind     = "infra/kind/cluster.yaml"
   }
 }
 

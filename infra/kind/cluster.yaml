@@ -1,0 +1,32 @@
+# Cluster kind "revenda" (ADR-005). Criado pela CLI kind (v0.33.0), NAO pelo Terraform:
+# o provider comunitario tehcyx/kind nao tem assinatura de codigo e e bloqueado pelo
+# Smart App Control do Windows 11. Uso (idempotente no CD e em 04-subir-ambiente.ps1):
+#   kind get clusters | grep -qx revenda || kind create cluster --config infra/kind/cluster.yaml --wait 120s
+# Portas do host so em 127.0.0.1 (nada exposto na rede local). Mudar este arquivo so
+# tem efeito recriando o cluster (05-destruir-ambiente.ps1 + 04-subir-ambiente.ps1).
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+name: revenda
+networking:
+  # Usada tambem na NetworkPolicy do revenda-db (variavel pod_subnet do Terraform)
+  podSubnet: 10.244.0.0/16
+nodes:
+  - role: control-plane
+    # Imagem do release kind v0.33.0 (Kubernetes 1.34 = mesmo minor do kubectl 1.34)
+    image: kindest/node:v1.34.11@sha256:44e222ee2132dab25ff87301682f89eb82c7880ea3a1bf543bfe9708fd08d67d
+    extraPortMappings:
+      # API (Service revenda-api, criado por k8s/base)
+      - containerPort: 30080
+        hostPort: 8080
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      # Keycloak
+      - containerPort: 30180
+        hostPort: 8180
+        listenAddress: "127.0.0.1"
+        protocol: TCP
+      # revenda-db (so responde quando expor_banco_revenda = true no Terraform)
+      - containerPort: 30432
+        hostPort: 15432
+        listenAddress: "127.0.0.1"
+        protocol: TCP
