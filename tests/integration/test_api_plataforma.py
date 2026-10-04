@@ -15,6 +15,7 @@ import pytest
 from cryptography.hazmat.primitives.asymmetric import rsa
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
+from sqlalchemy import text
 
 import revenda.main
 from apoio.api import SEGREDO_WEBHOOK, Api, tipo_problema
@@ -262,3 +263,50 @@ def test_logs_json_sem_token_sem_segredo_e_com_request_id(
     assert {"CompraIniciada", "VeiculoReservado", "VendaEfetivada", "VeiculoVendido"} <= eventos
     rotas = {r.get("rota") for r in registros if r.get("logger") == "revenda.acesso"}
     assert "/api/v1/veiculos/{veiculo_id}" in rotas or "/api/v1/pagamentos/webhook" in rotas
+
+
+def test_erro_500_registra_um_unico_stack_trace_sem_parametros_do_banco(
+    app: FastAPI, logs: io.StringIO
+) -> None:
+    banco: BancoDeDados = app.state.banco
+
+    def consulta_quebrada() -> None:
+        with banco.nova_sessao() as sessao:
+            # Divisão por zero no PostgreSQL com um parâmetro "sensível".
+            sessao.execute(
+                text("SELECT CAST(:valor AS integer) / 0"), {"valor": "987654321"}
+            ).scalar()
+
+    app.add_api_route("/falha-banco", consulta_quebrada)
+    # raise_server_exceptions=True: se a exceção escapasse do app (e chegasse ao uvicorn,
+    # que registraria um segundo stack trace em uvicorn.error), o TestClient a relançaria.
+    with TestClient(app, raise_server_exceptions=True) as cliente:
+        resposta = cliente.get("/falha-banco", headers={"X-Request-ID": "req-500"})
+    assert resposta.status_code == 500
+    assert tipo_problema(resposta) == "erro-interno"
+
+    registros = [json.loads(linha) for linha in logs.getvalue().splitlines() if linha.strip()]
+    com_stack = [r for r in registros if "excecao" in r]
+    assert len(com_stack) == 1
+    erro = com_stack[0]
+    assert (erro["logger"], erro["nivel"], erro["request_id"]) == (
+        "revenda.erros",
+        "ERROR",
+        "req-500",
+    )
+    assert "DivisionByZero" in erro["excecao"]
+    assert "987654321" not in logs.getvalue()  # hide_parameters=True
+    assert not [r for r in registros if r["logger"].startswith("uvicorn")]
+    acesso = [r for r in registros if r["logger"] == "revenda.acesso"]
+    assert [(r["nivel"], r["status"], r["rota"]) for r in acesso] == [
+        ("ERROR", 500, "/falha-banco")
+    ]
+
+
+def test_nivel_do_log_de_acesso_por_status(api: Api, logs: io.StringIO) -> None:
+    api.http.get("/health/live")
+    api.http.get("/api/v1/vendas/minhas")  # sem token: 401
+    api.http.post("/api/v1/veiculos", json={}, headers=api.novo_cliente())  # cliente: 403
+    registros = [json.loads(linha) for linha in logs.getvalue().splitlines() if linha.strip()]
+    niveis = {r["status"]: r["nivel"] for r in registros if r["logger"] == "revenda.acesso"}
+    assert niveis == {200: "INFO", 401: "WARNING", 403: "WARNING"}

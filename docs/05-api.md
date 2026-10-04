@@ -20,7 +20,7 @@ Este documento é o contrato HTTP da `revenda-api`: convenções gerais, autenti
 
 ### 1.1 Paginação
 
-As listagens aceitam `limite` (padrão 20, mínimo 1, máximo 100) e `deslocamento` (padrão 0, mínimo 0). Valores fora da faixa resultam em `422`.
+As listagens aceitam `limite` (padrão 20, mínimo 1, máximo 100) e `deslocamento` (padrão 0, mínimo 0, **máximo 1.000.000**). Valores fora da faixa resultam em `422`. O teto do deslocamento evita consultas com `OFFSET` gigantesco, que forçariam o banco a percorrer e descartar milhões de linhas, uma forma barata de negação de serviço.
 
 ```json
 {
@@ -51,7 +51,7 @@ Content-Type: application/problem+json
 }
 ```
 
-Erro de validação (`422`):
+Erro de validação (`422`). As mensagens de `erros` são em português, tanto as das regras de domínio quanto as de tipo e formato geradas na validação da entrada:
 
 ```json
 {
@@ -84,7 +84,7 @@ Catálogo de tipos de problema:
 | `transicao-invalida` | 409 | Transição de estado não permitida (ex.: cancelar venda `EFETIVADA`) |
 | `reserva-expirada` | 409 | Webhook `APROVADO` para venda cuja reserva venceu (a venda é cancelada) |
 | `conflito-concorrencia` | 409 | Atualização concorrente detectada pela `versao` do veículo |
-| `validacao` | 422 | Campos fora das regras (tipos, faixas, tamanhos, parâmetros de consulta) |
+| `validacao` | 422 | Campos fora das regras (tipos, faixas, tamanhos, caracteres de controle, parâmetros de consulta) |
 | `erro-interno` | 500 | Falha inesperada; o `detail` nunca expõe stack trace nem SQL |
 | `indisponivel` | 503 | Banco indisponível (apenas em `/health/ready`) |
 
@@ -151,13 +151,15 @@ O usuário `gestor.loja` **não** recebe o papel `cliente` (por isso o passo 4 d
 
 | Campo | Tipo | Regras |
 |---|---|---|
-| `marca` | string | 1 a 60 caracteres, espaços nas pontas removidos |
-| `modelo` | string | 1 a 60 caracteres |
-| `ano` | inteiro | 1950 até o ano corrente + 1 |
-| `cor` | string | 1 a 30 caracteres |
+| `marca` | string | 1 a 60 caracteres, espaços nas pontas removidos; sem caracteres de controle |
+| `modelo` | string | 1 a 60 caracteres; sem caracteres de controle |
+| `ano` | inteiro (estrito) | 1950 até o ano corrente + 1. Tipo estrito: só número inteiro JSON; texto (`"2023"`), número com casas decimais ou booleano resultam em 422 |
+| `cor` | string | 1 a 30 caracteres; sem caracteres de controle |
 | `preco` | string decimal | > 0, no máximo 10 dígitos inteiros e 2 decimais (`NUMERIC(12,2)`) |
 | `status` | enum | `A_VENDA`, `RESERVADO`, `VENDIDO` (somente leitura) |
-| `versao` | inteiro | Incrementado a cada alteração (somente leitura) |
+| `versao` | inteiro | Incrementado a cada alteração efetiva (somente leitura) |
+
+**Caracteres de controle.** `marca`, `modelo` e `cor` recusam caracteres de controle com `422`: a faixa C0 (`\u0000` a `\u001f`, que inclui quebra de linha e tabulação) e o DEL (`\u007f`). O PostgreSQL nem aceitaria o NUL num campo de texto. Esses campos aparecem em listagens, no *snapshot* da venda e nos logs; aceitar controles abriria espaço para injeção em logs e para textos que quebram a exibição no front-end.
 
 ### 3.2 Representação de Venda
 
@@ -187,6 +189,7 @@ Resumo:
 |---|---|---|---|
 | GET | `/health/live` | público | 200 |
 | GET | `/health/ready` | público | 200 / 503 |
+| GET | `/metrics` | público no ambiente local (ver 4.14) | 200 |
 | POST | `/api/v1/veiculos` | gestor | 201 |
 | PATCH | `/api/v1/veiculos/{id}` | gestor | 200 |
 | GET | `/api/v1/veiculos/{id}` | público | 200 |
@@ -269,11 +272,13 @@ Content-Type: application/json
 | 400 | JSON malformado |
 | 401 | Sem token ou token inválido |
 | 403 | Token sem papel `gestor` |
-| 422 | Campo ausente ou fora das regras (ex.: `ano` 1949, `preco` `"0.00"`, `preco` como número com mais de 2 casas) |
+| 422 | Campo ausente ou fora das regras (ex.: `ano` 1949 ou `"2023"` como texto, `preco` `"0.00"`, `preco` como número com mais de 2 casas, `marca` com quebra de linha) |
 
 ### 4.4 `PATCH /api/v1/veiculos/{id}` — editar veículo
 
 Papel: **gestor**. Atualização parcial de `marca`, `modelo`, `ano`, `cor` e/ou `preco` (ao menos um campo). Só é permitida com o veículo em `A_VENDA`. `status`, `versao` e datas não são editáveis (campos desconhecidos ou somente leitura resultam em 422). Corpo `application/json` com semântica de *merge* (campos ausentes não mudam). Evento: `VeiculoEditado`.
+
+**Idempotência.** Um `PATCH` que não muda nenhum valor (por exemplo, o mesmo preço já gravado) responde `200` com o veículo como está: `versao` e `atualizado_em` não mudam e nenhum evento é registrado. Repetir a mesma edição, portanto, não gera versões novas.
 
 Parâmetros: `id` (path, UUID).
 
@@ -310,7 +315,7 @@ Content-Type: application/json
 
 ### 4.5 `GET /api/v1/veiculos/{id}` — consultar veículo
 
-Papel: **público**. Retorna o veículo em qualquer status.
+Papel: **público**. Retorna o veículo em qualquer status. Se o veículo estiver `RESERVADO` por uma venda já vencida, a expiração preguiçosa é aplicada antes da leitura e a resposta mostra o veículo `A_VENDA` ([ADR-009](adrs/ADR-009-expiracao-preguicosa.md)).
 
 ```http
 GET /api/v1/veiculos/1e9b7c3d-2a4f-4d6e-8b1a-5c7d9e0f2a34 HTTP/1.1
@@ -363,7 +368,7 @@ GET /api/v1/veiculos/a-venda?limite=3&deslocamento=0 HTTP/1.1
 
 | Código | Quando |
 |---|---|
-| 422 | `limite` fora de 1..100 ou `deslocamento` negativo |
+| 422 | `limite` fora de 1..100 ou `deslocamento` fora de 0..1.000.000 |
 
 ### 4.7 `GET /api/v1/veiculos/vendidos` — listar veículos vendidos
 
@@ -433,7 +438,7 @@ Content-Type: application/json
 
 ### 4.9 `GET /api/v1/vendas/minhas` — minhas compras
 
-Papel: **cliente**. Lista as vendas cujo `comprador_id` é o `sub` do token, em todos os status, ordenadas por `criada_em` descendente. Parâmetros: `limite`, `deslocamento`.
+Papel: **cliente**. Lista as vendas cujo `comprador_id` é o `sub` do token, em todos os status, ordenadas por `criada_em` descendente. Parâmetros: `limite`, `deslocamento`. Reservas vencidas são expiradas antes da consulta, para que nenhuma apareça como `AGUARDANDO_PAGAMENTO`.
 
 ```json
 {
@@ -466,7 +471,7 @@ Papel: **cliente**. Lista as vendas cujo `comprador_id` é o `sub` do token, em 
 
 ### 4.10 `GET /api/v1/vendas/{id}` — consultar venda
 
-Papel: **dono** (cliente cujo `sub` = `comprador_id`) ou **gestor**. Para um cliente que não é o dono, a API responde `404` (e não `403`), para não revelar a existência da venda (proteção contra BOLA/IDOR).
+Papel: **dono** (cliente cujo `sub` = `comprador_id`) ou **gestor**. Para um cliente que não é o dono, a API responde `404` (e não `403`), para não revelar a existência da venda (proteção contra BOLA/IDOR). Se a venda está `AGUARDANDO_PAGAMENTO` com a reserva vencida, ela é cancelada com `RESERVA_EXPIRADA` (e o veículo liberado) antes da resposta.
 
 ```http
 GET /api/v1/vendas/c3a7d1e2-58b4-4f6a-a1d9-0e2f4b6c8a10 HTTP/1.1
@@ -498,7 +503,7 @@ Authorization: Bearer eyJ...   (gestor)
 
 ### 4.11 `GET /api/v1/vendas` — listar vendas (gestão)
 
-Papel: **gestor**. Lista todas as vendas, ordenadas por `criada_em` descendente, com `comprador_id`.
+Papel: **gestor**. Lista todas as vendas, ordenadas por `criada_em` descendente, com `comprador_id`. Como em 4.9, reservas vencidas são expiradas antes da consulta (o filtro `status=AGUARDANDO_PAGAMENTO` nunca devolve reserva vencida).
 
 Parâmetros de consulta: `status` (opcional; `AGUARDANDO_PAGAMENTO`, `EFETIVADA` ou `CANCELADA`), `limite`, `deslocamento`.
 
@@ -579,7 +584,7 @@ Headers:
 
 | Header | Obrigatório | Valor |
 |---|---|---|
-| `X-Webhook-Secret` | sim | Segredo gerado pelo Terraform (32+ caracteres) |
+| `X-Webhook-Secret` | sim | Segredo gerado pelo Terraform (48 caracteres). A API exige `WEBHOOK_SECRET` com no mínimo 16 caracteres e não inicia sem ele |
 | `Content-Type` | sim | `application/json` |
 
 Payload:
@@ -631,3 +636,25 @@ Comportamento por estado da venda:
 | 422 | Payload fora do formato |
 
 Em uma integração real, o gateway reenviaria notificações sem resposta 2xx; por isso a idempotência é parte do contrato. O gateway deve tratar 409 como estado final (não reenviar).
+
+### 4.14 `GET /metrics`: métricas Prometheus
+
+Papel: **público** no ambiente local (como `/health/*`, fica fora do prefixo `/api/v1` e não aparece no OpenAPI). Responde no formato de exposição de texto do Prometheus (`text/plain; version=0.0.4`). Não contém dados pessoais nem identificadores: só contagens e latências agregadas. Em produção, o acesso deve ficar restrito à rede interna do cluster.
+
+| Métrica | Tipo | Rótulos | Significado |
+|---|---|---|---|
+| `revenda_http_requisicoes_total` | contador | `metodo`, `rota`, `status` | Requisições atendidas |
+| `revenda_http_requisicao_duracao_segundos` | histograma (faixas de 5 ms a 5 s) | `metodo`, `rota`, `status` | Latência das requisições |
+| `revenda_vendas_iniciadas_total` | contador | — | Compras iniciadas (`CompraIniciada`) |
+| `revenda_vendas_efetivadas_total` | contador | — | Vendas efetivadas pelo webhook |
+| `revenda_vendas_canceladas_total` | contador | `motivo` | Vendas canceladas, por motivo (`PAGAMENTO_RECUSADO`, `DESISTENCIA_COMPRADOR`, `CANCELADA_PELA_LOJA`, `RESERVA_EXPIRADA`) |
+| `revenda_veiculos_cadastrados_total` | contador | — | Veículos cadastrados |
+
+O rótulo `rota` é o **template** da rota (ex.: `/api/v1/vendas/{venda_id}`), nunca o caminho com o identificador, para manter a cardinalidade baixa; caminhos inexistentes (404) usam `nao_mapeada`. A resposta inclui também as métricas padrão do processo Python (`process_*`, `python_*`). Exemplo de trecho da resposta:
+
+```text
+revenda_http_requisicoes_total{metodo="GET",rota="/api/v1/veiculos/a-venda",status="200"} 42.0
+revenda_vendas_canceladas_total{motivo="PAGAMENTO_RECUSADO"} 1.0
+```
+
+Os contadores são por processo (cada réplica tem os seus); a soma entre réplicas é feita pelo Prometheus. Uso, golden signals, SLOs e alertas propostos estão em [12-observabilidade.md](12-observabilidade.md).

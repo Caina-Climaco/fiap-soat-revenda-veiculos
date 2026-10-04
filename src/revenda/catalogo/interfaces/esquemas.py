@@ -6,10 +6,12 @@ from decimal import Decimal
 from typing import Annotated, Self
 from uuid import UUID
 
-from pydantic import Field, model_validator
+from pydantic import BeforeValidator, Field, model_validator
 
 from revenda.catalogo.domain.veiculo import (
     ANO_MINIMO,
+    CARACTERES_DE_CONTROLE,
+    MENSAGEM_CARACTERE_CONTROLE,
     TAMANHO_MAXIMO_COR,
     TAMANHO_MAXIMO_MARCA,
     TAMANHO_MAXIMO_MODELO,
@@ -17,27 +19,59 @@ from revenda.catalogo.domain.veiculo import (
 )
 from revenda.shared.http import DataHoraUtc, Dinheiro, ModeloRequisicao, ModeloResposta
 
-Marca = Annotated[str, Field(min_length=1, max_length=TAMANHO_MAXIMO_MARCA, examples=["Fiat"])]
+
+def _sem_caracteres_de_controle(valor: object) -> object:
+    # Roda antes do strip do modelo, sobre o valor bruto (mesma regra do domínio).
+    if isinstance(valor, str) and CARACTERES_DE_CONTROLE.search(valor):
+        raise ValueError(MENSAGEM_CARACTERE_CONTROLE)
+    return valor
+
+
+# Depois do Field no Annotated: o BeforeValidator envolve o str já com as restrições de
+# tamanho, que continuam gerando string_too_short/string_too_long.
+SemControle = BeforeValidator(_sem_caracteres_de_controle)
+
+Marca = Annotated[
+    str,
+    Field(min_length=1, max_length=TAMANHO_MAXIMO_MARCA, examples=["Fiat"]),
+    SemControle,
+]
 Modelo = Annotated[
-    str, Field(min_length=1, max_length=TAMANHO_MAXIMO_MODELO, examples=["Argo Drive 1.3"])
+    str,
+    Field(min_length=1, max_length=TAMANHO_MAXIMO_MODELO, examples=["Argo Drive 1.3"]),
+    SemControle,
 ]
 Ano = Annotated[
     int,
     Field(
+        strict=True,  # inteiro JSON de verdade: "2020" e 2020.0 são recusados
         ge=ANO_MINIMO,
-        description="De 1950 até o ano corrente + 1 (o limite superior é validado no domínio).",
+        description=(
+            "Número inteiro JSON (não string), de 1950 até o ano corrente + 1 (o limite "
+            "superior é validado no domínio)."
+        ),
         examples=[2023],
     ),
 ]
-Cor = Annotated[str, Field(min_length=1, max_length=TAMANHO_MAXIMO_COR, examples=["Vermelho"])]
+Cor = Annotated[
+    str,
+    Field(min_length=1, max_length=TAMANHO_MAXIMO_COR, examples=["Vermelho"]),
+    SemControle,
+]
 Preco = Annotated[
     Decimal,
     Field(
         gt=0,
         max_digits=12,
         decimal_places=2,
-        description='String decimal com até 2 casas (BRL), ex.: "79900.00".',
+        description=(
+            "Valor em BRL com até 2 casas decimais. **Envie como string decimal** (ex.: "
+            '"79900.00"), que preserva o valor exato; números JSON também são aceitos, mas '
+            "passam por ponto flutuante no cliente e podem perder precisão. As respostas "
+            "sempre trazem string."
+        ),
         examples=["79900.00"],
+        json_schema_extra={"example": "79900.00"},
     ),
 ]
 

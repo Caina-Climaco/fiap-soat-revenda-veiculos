@@ -137,7 +137,7 @@ Comportamento sob concorrência (detalhado no [ADR-008](adrs/ADR-008-concorrenci
 ### 5.2 Execução no cluster (Job do Kubernetes)
 
 1. O CD remove o Job anterior (`kubectl delete job revenda-migracao --ignore-not-found`) e aplica `k8s/migracao` com a imagem `revenda-api:<sha>` (a mesma do Deployment).
-2. O Job executa `alembic upgrade head` com `backoffLimit: 2`, `activeDeadlineSeconds: 300`, `restartPolicy: Never`.
+2. O Job executa `python -m revenda.migracao` (`backoffLimit: 2`, `activeDeadlineSeconds: 300`, `restartPolicy: Never`) é **tolerante a rollback**: primeiro compara a revisão gravada em `public.alembic_version` com as revisões que a imagem conhece. Se o banco está numa revisão desconhecida pela imagem (criada por uma versão mais nova, caso de rollback), o Job não altera nada e termina com sucesso; caso contrário (banco vazio ou revisão conhecida), executa `alembic upgrade head`.
 3. O CD aguarda `kubectl wait --for=condition=complete job/revenda-migracao --timeout=300s`. Se o Job falhar, o pipeline para **antes** do rollout, e a versão anterior continua servindo.
 4. Só então o Deployment é atualizado e o CD aguarda `kubectl rollout status`.
 
@@ -146,9 +146,9 @@ Executar a migração em um Job único, e não no *startup* de cada pod, evita a
 ### 5.3 Regras para migrações seguras
 
 - **Compatibilidade com a versão anterior** (*expand/contract*): durante o rollout, pods da versão N-1 convivem com o schema N. Colunas novas entram como anuláveis ou com padrão; remoções e renomeações são feitas em duas entregas (primeiro o código deixa de usar, depois a migração remove).
-- **Sem downgrade em produção**: o rollback de aplicação (ver [08-ci-cd-infra.md](08-ci-cd-infra.md)) não executa `alembic downgrade`; problemas de schema são corrigidos com nova migração (*forward fix*). Os scripts de `downgrade` existem para uso em desenvolvimento.
+- **Sem downgrade em produção**: o rollback de aplicação (ver [08-ci-cd-infra.md](08-ci-cd-infra.md), seção 6) não executa `alembic downgrade`; o Job de migração da versão anterior reconhece o schema mais novo e o mantém, e o código anterior funciona sobre ele graças ao *expand/contract*. Problemas de schema são corrigidos com nova migração (*forward fix*). Os scripts de `downgrade` existem para uso em desenvolvimento e são exercitados em `tests/integration/test_migracoes_e_schema.py::test_downgrade_e_upgrade_do_zero`.
 - Criação de índices em tabelas grandes usaria `CREATE INDEX CONCURRENTLY` (fora de transação); no volume deste projeto não é necessário.
-- No CI, os testes de integração aplicam `alembic upgrade head` no Postgres de serviço, o que valida cada migração a cada PR.
+- No CI, os testes de integração aplicam `alembic upgrade head` do zero no Postgres de serviço, o que valida cada migração a cada PR.
 
 ### 5.4 Dados iniciais
 
@@ -171,7 +171,7 @@ O enunciado exige que os dados de clientes fiquem "totalmente apartados" dos dad
 | Venda (preço, status, datas, código de pagamento) | API: `vendas.vendas` | Dado transacional; vinculado ao titular apenas pelo pseudônimo |
 | Snapshot do veículo na venda | API: `vendas.vendas.veiculo_*` | Histórico imutável da transação |
 
-Mapeadores de protocolo do client `revenda-swagger` incluem no access token apenas `sub`, `realm_access.roles`, `aud`, `azp` e as claims técnicas do OIDC; os escopos padrão `profile` e `email` são removidos desse client, de modo que nome e e-mail também não chegam à API pelo token. A análise de LGPD está em [07-seguranca-lgpd.md](07-seguranca-lgpd.md).
+Nos clients `revenda-swagger` e `revenda-e2e`, os escopos `profile` e `email` são apenas **opcionais** (não são concedidos por padrão), e o escopo `basic` fornece o `sub`. O access token emitido para a API carrega somente `sub`, `realm_access.roles` (papéis), `aud` (`revenda-api`, pelo mapper de audiência), `azp` e as claims técnicas do OIDC (`iss`, `exp`, `iat`, `jti`, `typ`); nome, e-mail, CPF e telefone não chegam à API pelo token. Observação: o realm é importado com a estratégia `IGNORE_EXISTING`, isto é, só na criação; num ambiente já existente, uma mudança de escopos no `realm-revenda.json` só vale depois de recriar o realm (ou de aplicá-la pelo console de administração). A análise de LGPD está em [07-seguranca-lgpd.md](07-seguranca-lgpd.md).
 
 ## 7. Backup e retenção (ambiente local)
 

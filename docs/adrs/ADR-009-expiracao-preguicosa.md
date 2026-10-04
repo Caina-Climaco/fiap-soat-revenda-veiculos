@@ -18,19 +18,24 @@ Quando a compra é iniciada, o veículo fica `RESERVADO`. Se o comprador nunca p
 ## Decisão
 
 - O TTL da reserva é configurável (`RESERVA_TTL_MINUTOS`, padrão 30).
-- A expiração é aplicada:
-  - no início de `ListarAVenda`, varrendo até 100 vendas vencidas por chamada;
+- A expiração é aplicada nas escritas:
   - em `IniciarCompra`, quando o veículo está reservado por venda vencida;
-  - em `ProcessarPagamento`, quando a venda está vencida.
+  - em `ProcessarPagamento` e `CancelarVenda`, quando a venda envolvida está vencida.
+- E também nas leituras, para que nenhuma resposta mostre uma reserva vencida como ativa:
+  - no início de `ListarAVenda`, varrendo até 100 vendas vencidas por chamada;
+  - em `ObterVeiculo`, quando o veículo está reservado por venda vencida;
+  - em `ObterVenda`, quando a venda consultada está vencida;
+  - no início das listagens de vendas (`ListarVendas`, para o comprador e para o gestor).
 - Ao expirar, a venda vira `CANCELADA` com motivo `RESERVA_EXPIRADA`, e o veículo volta a `A_VENDA`. O relógio é injetado (`Clock`) para permitir testes determinísticos.
 
 ## Consequências
 
 ### Positivas
-- Zero infraestrutura adicional. O comportamento visível ao usuário é sempre correto.
+- Zero infraestrutura adicional. O comportamento visível pela API é sempre correto: leituras e escritas aplicam a expiração antes de responder.
 
 ### Negativas
 - Relatórios que leem o banco diretamente podem ver reservas vencidas ainda como ativas.
+- Leituras passam a poder escrever (cancelar a venda vencida e liberar o veículo), o que exige transação também em rotas `GET`; os UPDATEs condicionais mantêm essas escritas idempotentes sob concorrência.
 
 ## Mitigações
 - A evolução documentada é um CronJob de saneamento. Os relatórios devem usar a API.

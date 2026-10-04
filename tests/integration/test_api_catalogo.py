@@ -219,3 +219,16 @@ def test_paginacao_invalida_422(api: Api, rota: str, params: dict[str, Any]) -> 
     resposta = api.http.get(rota, params=params)
     assert resposta.status_code == 422
     assert tipo_problema(resposta) == "validacao"
+
+
+def test_edicao_sem_mudanca_real_devolve_200_sem_nova_versao(api: Api) -> None:
+    veiculo = api.cadastrar(marca="Fiat", cor="Prata", preco="54900.00")
+    resposta = api.http.patch(
+        f"/api/v1/veiculos/{veiculo['id']}",
+        json={"preco": "54900", "cor": " Prata ", "marca": "Fiat"},
+        headers=api.gestor,
+    )
+    assert resposta.status_code == 200, resposta.text
+    corpo = resposta.json()
+    assert corpo == veiculo  # mesmo estado: versao 1 e atualizado_em inalterado
+    assert api.veiculo(veiculo["id"])["versao"] == 1

@@ -71,7 +71,8 @@ jobs:
     timeout-minutes: 20
     services:
       postgres:
-        image: postgres:16-alpine
+        # Mesma versao fixa do docker-compose.yml e do Terraform (infra/terraform/variables.tf).
+        image: postgres:16.15-alpine
         env:
           POSTGRES_USER: revenda
           POSTGRES_PASSWORD: revenda
@@ -277,6 +278,12 @@ jobs:
             verificar "[.clients[]?.clientId] | index(\"$c\") != null" "client $c ausente"
           done
           verificar '.clients[] | select(.clientId == "revenda-e2e") | .directAccessGrantsEnabled == true' 'revenda-e2e precisa de directAccessGrantsEnabled'
+          # LGPD (minimizacao): access token so com sub (escopo basic) e papeis (roles);
+          # profile e email ficam opcionais, fora do token por padrao.
+          for c in revenda-swagger revenda-e2e; do
+            verificar ".clients[] | select(.clientId == \"$c\") | (.defaultClientScopes | index(\"basic\") != null and index(\"roles\") != null)" "client $c precisa dos escopos padrao basic e roles"
+            verificar ".clients[] | select(.clientId == \"$c\") | ([.defaultClientScopes[] | select(. == \"profile\" or . == \"email\")] | length == 0)" "client $c nao pode ter profile/email como escopo padrao (minimizacao LGPD)"
+          done
           echo "Realm OK"
 
   # Valida o titulo do PR (vira a mensagem do squash na main) no formato

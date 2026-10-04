@@ -1,4 +1,4 @@
-# ADR-005: Kubernetes local (kind) provisionado por Terraform, com NodePort e sem Ingress
+# ADR-005: Kubernetes local (kind via CLI) com plataforma provisionada por Terraform, NodePort sem Ingress
 
 **Status:** Aceito
 **Data:** 2026-10-03
@@ -11,7 +11,8 @@
 
 | Alternativa | Prós | Contras |
 |---|---|---|
-| **kind via Terraform** | Kubernetes real em Docker; custo zero; reproduzível; experiência prévia | Depende do PC ligado; sem URL pública |
+| **kind criado pela CLI + plataforma por Terraform** (escolhida) | Kubernetes real em Docker; custo zero; reproduzível; experiência prévia; só binários assinados no caminho do deploy | Depende do PC ligado; sem URL pública; o cluster fica fora do state do Terraform |
+| kind criado pelo Terraform (provider `tehcyx/kind`), plano original | Cluster e conteúdo num único state | Binário do provider sem assinatura de código, bloqueado pelo Smart App Control do Windows 11 (ver Decisão) |
 | Docker Compose apenas | Simples | Não exercita orquestração, probes, HPA e rollout, que são temas do curso |
 | Minikube ou k3d | Equivalentes | Sem vantagem sobre o kind, que já é conhecido |
 | PaaS gratuito (Render etc.) | URL pública | Limites de memória incompatíveis com o Keycloak; hibernação; banco gratuito expira |

@@ -21,7 +21,7 @@ flowchart TB
 | Unidade | `unit` | ~70% dos testes | Agregados `Veiculo` e `Venda` (transições, invariantes, expiração, idempotência), value objects (código de pagamento, preço, ano), casos de uso com repositórios em memória, `CatalogoPort` falso e relógio fixo; validação de JWT com chave RSA gerada no teste; regras de arquitetura (imports) | SQL, HTTP, Keycloak | Nada externo |
 | Integração | `integration` | ~25% | Repositórios SQLAlchemy contra PostgreSQL 16 (ordenação, paginação, índice único parcial, UPDATE condicional); concorrência real (N compras simultâneas do mesmo veículo); API completa com `TestClient` (status HTTP, `problem+json`, autorização por papel, webhook); migrações Alembic aplicadas do zero | Keycloak real, cluster | PostgreSQL (docker compose localmente; *service container* no CI) |
 | Ponta a ponta | `e2e` | ~5% | Fluxo do roteiro do vídeo contra o ambiente implantado no kind: tokens reais do Keycloak, compra, webhook, efetivação, listagens | Casos de borda já cobertos abaixo | Cluster kind com API (8080) e Keycloak (8180) |
-| Carga (opcional) | — | — | Meta de desempenho das listagens (RNF-10) e reação do HPA | Correção funcional | Cluster kind, k6 ou hey |
+| Carga | — (script k6, fora do pytest) | — | Meta de desempenho das listagens (RNF-10) e reação do HPA (RNF-09) | Correção funcional | Cluster kind ou docker compose, k6 |
 
 ## 9.2 Ferramentas
 
@@ -35,7 +35,7 @@ flowchart TB
 | PostgreSQL 16 (`postgres:16-alpine`) | Banco dos testes de integração (docker compose local; *service container* no CI) |
 | Alembic | Aplica as migrações no banco de teste antes da suíte de integração |
 | ruff, mypy | Lint, formatação e tipos (não são testes, mas bloqueiam o CI) |
-| k6 ou hey | Carga opcional nas listagens |
+| k6 | Teste de carga nas listagens (`tests/carga/listagens.js`) |
 
 Os cenários Gherkin da seção 9.5 são especificação: são implementados como funções pytest comuns (sem pytest-bdd), cujo nome e *docstring* citam o identificador do cenário (ex.: `test_bdd_03_compra_concorrente`), mantendo a rastreabilidade sem uma dependência a mais.
 
@@ -45,14 +45,14 @@ Pré-requisitos: Python 3.12, Docker e, para e2e, o ambiente implantado (ver REA
 
 ```bash
 # 1. Dependências de desenvolvimento
-uv sync          # cria .venv com dependências de desenvolvimento (uv.lock)
+uv sync --frozen   # cria .venv com dependências de desenvolvimento (uv.lock)
 
 # 2. Unidade (rápido, sem dependências externas)
 uv run pytest -m unit
 
-# 3. Integração (sobe só o PostgreSQL do docker compose)
+# 3. Integração (sobe só o PostgreSQL do docker compose; requer o .env da opção A do README)
 docker compose up -d postgres
-export TEST_DATABASE_URL="postgresql+psycopg://revenda:revenda@localhost:5432/revenda_test"
+export TEST_DATABASE_URL="postgresql+psycopg://revenda:<DB_PASSWORD do .env>@localhost:5432/revenda_test"
 uv run pytest -m integration
 
 # 4. Unidade + integração com cobertura (mesmo critério do CI)
@@ -75,7 +75,8 @@ Observações:
 
 - Os testes `e2e` ficam fora da execução padrão (`addopts = -m "not e2e"` no `pyproject.toml`); só rodam quando selecionados explicitamente.
 - O e2e obtém tokens pelo client `revenda-e2e` (password grant), habilitado somente no realm do ambiente local; cria seus próprios clientes de teste com nomes aleatórios para poder ser executado repetidas vezes.
-- No CI, a etapa de integração usa o *service container* `postgres:16`; no CD, o e2e roda no runner self-hosted após o rollout.
+- O docker compose cria o banco `revenda_test` na primeira subida do serviço `postgres`, com o usuário `revenda` e a senha `DB_PASSWORD` do `.env`. Sem `TEST_DATABASE_URL`, os testes de integração são pulados com aviso.
+- No CI, a etapa de integração usa o *service container* `postgres:16-alpine` (credenciais fixas de teste, sem segredo real); no CD, o e2e roda no runner self-hosted após o rollout, contra `http://revenda-control-plane:30080` e `:30180`.
 
 ## 9.4 Critérios da suíte
 
@@ -308,12 +309,26 @@ Funcionalidade: Listagens públicas ordenadas por preço
     E o total informado é 3
 ```
 
-## 9.6 Teste de carga (opcional)
+## 9.6 Teste de carga (k6)
 
-Objetivo: evidenciar RNF-10 (p95 < 300 ms nas listagens com 1.000 veículos) e o comportamento do HPA (RNF-09).
+Objetivo: evidenciar RNF-10 (p95 < 300 ms nas listagens públicas) e observar o HPA (RNF-09). O script é `tests/carga/listagens.js`, para o [k6](https://grafana.com/docs/k6/latest/), com instruções em `tests/carga/README.md`:
 
-1. Popular 1.000 veículos via `POST /api/v1/veiculos` com token de gestor (script em `tests/carga/`).
-2. Executar k6 com 20 usuários virtuais por 1 minuto contra `GET /api/v1/veiculos/a-venda?limite=20` e `GET /api/v1/veiculos/vendidos?limite=20`, com *threshold* `p(95)<300`.
-3. Em paralelo, acompanhar `kubectl -n revenda get hpa -w`.
+| Item | Valor |
+|---|---|
+| Alvo | `GET /api/v1/veiculos/a-venda` e `GET /api/v1/veiculos/vendidos` com `limite=20` (públicos, sem token); cada iteração confere status 200 e a presença de `itens` |
+| Carga | 20 usuários virtuais (VUs) durante 1 minuto |
+| *Thresholds* | `http_req_duration` com `p(95)<300` (ms) e `http_req_failed` com `rate<0.01` (erro < 1%) |
+| Resultado | O k6 termina com código diferente de zero se algum *threshold* falhar |
 
-O resultado (resumo do k6 e captura do HPA) é anexado ao README quando executado.
+```bash
+# Contra o ambiente implantado (kind) ou o docker compose: a API em localhost:8080
+k6 run tests/carga/listagens.js
+# Outra URL: variável API_URL (padrão http://localhost:8080)
+k6 run -e API_URL=http://localhost:8080 tests/carga/listagens.js
+
+# Em outro terminal, para acompanhar o HPA e o consumo dos pods:
+kubectl -n revenda get hpa revenda-api -w
+kubectl -n revenda top pods
+```
+
+Para um cenário mais próximo do estoque real, cadastre antes algumas centenas de veículos com o token do gestor (como no exemplo com curl do README). O resumo do k6 (p95, taxa de erro, requisições por segundo) e a captura do HPA servem de evidência para o vídeo. Durante a carga, `GET /metrics` mostra o histograma de latência crescendo por rota ([12-observabilidade.md](12-observabilidade.md)).

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import uuid
 from dataclasses import dataclass, field, fields
 from datetime import datetime
@@ -29,6 +30,10 @@ TAMANHO_MAXIMO_MODELO = 60
 TAMANHO_MAXIMO_COR = 30
 PRECO_MAXIMO = Decimal("9999999999.99")  # limite de NUMERIC(12,2)
 _CENTAVOS = Decimal("0.01")
+# Caracteres de controle C0 (\x00 a \x1f) e DEL: o PostgreSQL recusa NUL em colunas de
+# texto (antes virava 500) e os demais não têm uso legítimo em marca, modelo ou cor.
+CARACTERES_DE_CONTROLE = re.compile(r"[\x00-\x1f\x7f]")
+MENSAGEM_CARACTERE_CONTROLE = "não pode conter caracteres de controle"
 
 
 class StatusVeiculo(StrEnum):
@@ -146,16 +151,23 @@ class Veiculo:
         ano: int | None = None,
         cor: str | None = None,
         preco: Decimal | str | int | None = None,
-    ) -> None:
-        """Edição parcial (merge). Só com o veículo à venda (RN-02)."""
+    ) -> bool:
+        """Edição parcial (merge). Só com o veículo à venda (RN-02).
+
+        Devolve False, sem incrementar a versão nem gerar evento, quando todos os valores
+        informados já são os atuais (edição sem mudança real).
+        """
         if self.status is not StatusVeiculo.A_VENDA:
             raise VeiculoNaoEditavelError(self.id, self.status)
         dados = validar_dados(
             marca=marca, modelo=modelo, ano=ano, cor=cor, preco=preco, ano_corrente=agora.year
         )
-        alterados = dados.informados()
-        if not alterados:
+        informados = dados.informados()
+        if not informados:
             raise DadosVeiculoInvalidosError([("corpo", "informe ao menos um campo para editar")])
+        alterados = {n: v for n, v in informados.items() if getattr(self, n) != v}
+        if not alterados:
+            return False
         for nome, valor in alterados.items():
             setattr(self, nome, valor)
         self.versao += 1
@@ -168,6 +180,7 @@ class Veiculo:
                 ocorrido_em=agora,
             )
         )
+        return True
 
     def reservar(self, agora: datetime) -> None:
         self.aplicar(Transicao.RESERVAR, agora)
@@ -213,7 +226,10 @@ def validar_dados(
             erros.append((nome, "deve ser texto"))
             return None
         limpo = valor.strip()
-        if not limpo:
+        # Verificado no valor bruto: strip() removeria \t, \n e \x1c-\x1f das pontas.
+        if CARACTERES_DE_CONTROLE.search(valor):
+            erros.append((nome, MENSAGEM_CARACTERE_CONTROLE))
+        elif not limpo:
             erros.append((nome, "não pode ser vazio"))
         elif len(limpo) > maximo:
             erros.append((nome, f"deve ter no máximo {maximo} caracteres"))

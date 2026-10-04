@@ -10,7 +10,7 @@ from fastapi.openapi.utils import get_openapi
 
 from revenda import __version__
 from revenda.catalogo.interfaces.router import PROBLEMAS_CATALOGO, criar_router_veiculos
-from revenda.composicao import Composicao
+from revenda.composicao import Composicao, acoes_metricas_negocio
 from revenda.shared.auth import Autenticacao, ProvedorJwks, ValidadorToken
 from revenda.shared.clock import Clock, RelogioSistema
 from revenda.shared.config import Settings
@@ -19,6 +19,7 @@ from revenda.shared.errors import registrar_problemas, registrar_tratadores_glob
 from revenda.shared.eventos import PublicadorEventos, PublicadorEventosLog
 from revenda.shared.http import Problema
 from revenda.shared.logging import configurar_logs
+from revenda.shared.metricas import Metricas, MetricasMiddleware, PublicadorEventosComMetricas
 from revenda.shared.middleware import CorrelacaoMiddleware
 from revenda.shared.saude import criar_router_saude
 from revenda.vendas.interfaces.router import (
@@ -71,10 +72,13 @@ def criar_app(
     auth = Autenticacao(
         validador, url_autorizacao=settings.url_autorizacao, url_token=settings.url_token
     )
+    metricas = Metricas()
     composicao = Composicao(
         banco,
         relogio or RelogioSistema(),
-        publicador or PublicadorEventosLog(),
+        PublicadorEventosComMetricas(
+            publicador or PublicadorEventosLog(), acoes_metricas_negocio(metricas)
+        ),
         ttl_reserva=timedelta(minutes=settings.reserva_ttl_minutos),
     )
     dep_catalogo, dep_vendas = composicao.dependencias()
@@ -91,6 +95,10 @@ def criar_app(
         },
         swagger_ui_parameters={"persistAuthorization": True},
     )
+    # O último adicionado é o mais externo: a correlação envolve as métricas, então o 500
+    # que ela produz para uma exceção também é contado (o middleware de métricas vê a
+    # exceção passar e registra status 500).
+    app.add_middleware(MetricasMiddleware, metricas=metricas)
     app.add_middleware(CorrelacaoMiddleware)
     registrar_tratadores_globais(app)
     registrar_problemas(app, {**PROBLEMAS_CATALOGO, **PROBLEMAS_VENDAS})
@@ -103,9 +111,13 @@ def criar_app(
     )
     app.include_router(api)
     app.include_router(criar_router_saude(banco.disponivel))
+    # Formato de exposição do Prometheus. Público no ambiente local; em produção, restringir
+    # ao scraper (NetworkPolicy/porta interna) ou proteger no proxy (ver shared/metricas.py).
+    app.add_route("/metrics", metricas.endpoint(), methods=["GET"], include_in_schema=False)
 
     _incluir_esquema_problema(app)
     app.state.banco = banco
+    app.state.metricas = metricas
     return app
 
 

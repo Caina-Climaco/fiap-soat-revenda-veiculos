@@ -35,7 +35,8 @@ Entregar uma API REST funcional, testada e implantada de forma automatizada que 
 | Efetivação ou recusa da compra por webhook de gateway de pagamento **simulado** | `POST /api/v1/pagamentos/webhook` com segredo compartilhado |
 | Cancelamento da compra pelo comprador (desistência) ou pela loja | Somente antes da efetivação |
 | Cadastro, login e papéis de usuários no **Keycloak** com PostgreSQL próprio | Realm `revenda`, papéis `cliente` e `gestor` |
-| Infraestrutura local: cluster Kubernetes **kind** provisionado por **Terraform** | Sem nuvem |
+| Infraestrutura local: cluster Kubernetes **kind** criado pela CLI `kind`, com a plataforma (namespaces, bancos, Keycloak, segredos) provisionada por **Terraform** | Sem nuvem |
+| Observabilidade: logs JSON, probes e métricas Prometheus em `/metrics` | Prometheus, Grafana e APM como evolução ([12-observabilidade.md](12-observabilidade.md)) |
 | CI no GitHub Actions (runner hospedado) e CD no runner self-hosted do autor | Deploy automático a cada merge na `main` |
 | Testes de unidade, integração e ponta a ponta (e2e) | Cobertura mínima de 80% |
 | Documentação, README, vídeo e PDF de entrega | Ver [10-plano-execucao.md](10-plano-execucao.md) |
@@ -51,6 +52,7 @@ Entregar uma API REST funcional, testada e implantada de forma automatizada que 
 | Fotos, opcionais, quilometragem e busca com filtros avançados | Não pedidos; o modelo admite extensão futura |
 | Múltiplas lojas ou filiais | Uma única revenda |
 | Notificações (e-mail, SMS, push) | Não pedidas |
+| API Gateway (Kong, APIM) e funções Serverless (Lambda, SAM, Cognito) | Sem conta de nuvem e um único backend; justificativa e onde entrariam em [ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md) |
 | Mensageria (broker) e sagas | Eventos de domínio são apenas registrados em log estruturado ([02-modelagem-ddd.md](02-modelagem-ddd.md)) |
 | Nuvem pública, alta disponibilidade multi-nó, backup gerenciado | Restrição de custo; ambiente local |
 | Telas próprias de cadastro além das oferecidas pelo Keycloak | O formulário de registro do realm atende ao cadastro |
@@ -100,4 +102,7 @@ Entregar uma API REST funcional, testada e implantada de forma automatizada que 
 | 08 | [CI/CD e infraestrutura](08-ci-cd-infra.md) | Terraform, kind, manifestos, pipelines, governança do repositório |
 | 09 | [Testes](09-testes.md) | Estratégia, níveis, cenários BDD, como executar |
 | 10 | [Plano de execução](10-plano-execucao.md) | Backlog, DoR, DoD, cronograma e riscos |
+| 11 | [Roteiro do vídeo](11-roteiro-video.md) | Roteiro da demonstração em vídeo, checklist de preparação e comandos |
+| 12 | [Observabilidade](12-observabilidade.md) | Logs, métricas Prometheus, golden signals, SLIs/SLOs, alertas e plano de APM |
+| 13 | [Design Approval Sheet](13-das.md) | Folha de aprovação do desenho: escopo, decisões, atributos de qualidade, riscos, custos e aprovação |
 | — | [ADRs](adrs/README.md) | Registros de decisões de arquitetura |
