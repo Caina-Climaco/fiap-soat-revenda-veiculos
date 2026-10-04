@@ -1,0 +1,20 @@
+# Configuracao nao sensivel da API (design brief 14.1). Segredos ficam nos Secrets
+# revenda-db-credentials e revenda-webhook-secret, criados pelo Terraform.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: revenda-api-config
+  labels:
+    app: revenda-api
+    app.kubernetes.io/name: revenda-api
+    app.kubernetes.io/part-of: revenda-veiculos
+data:
+  DB_HOST: revenda-db.revenda.svc.cluster.local
+  DB_PORT: "5432"
+  # Emissor publico (KC_HOSTNAME); o JWKS e buscado pelo endereco interno do Service.
+  OIDC_ISSUER: http://localhost:8180/realms/revenda
+  OIDC_JWKS_URL: http://keycloak.identidade.svc.cluster.local:8080/realms/revenda/protocol/openid-connect/certs
+  OIDC_AUDIENCE: revenda-api
+  OIDC_SWAGGER_CLIENT_ID: revenda-swagger
+  RESERVA_TTL_MINUTOS: "30"
+  LOG_LEVEL: INFO

@@ -27,15 +27,15 @@ As versões dos providers são fixadas em `versions.tf` (`required_providers` co
 | PostgreSQL da API | StatefulSet `revenda-db` (`postgres:16-alpine`, PVC 1 Gi) + Service ClusterIP `revenda-db` |
 | PostgreSQL do Keycloak | StatefulSet `keycloak-db` (`postgres:16-alpine`, PVC 1 Gi) + Service ClusterIP `keycloak-db` |
 | Keycloak | ConfigMap com `keycloak/realm-revenda.json`; Deployment `keycloak` (`quay.io/keycloak/keycloak:26.x`, `start-dev --import-realm`, `KC_HOSTNAME=http://localhost:8180`, `KC_HOSTNAME_BACKCHANNEL_DYNAMIC=true`, `KC_HEALTH_ENABLED=true`, admin via `KC_BOOTSTRAP_ADMIN_USERNAME/PASSWORD`); Service NodePort 30180 |
-| `kubernetes_network_policy` | `revenda-db` aceita só pods com rótulo `revenda.io/acesso-db: "true"` (API e Job de migração); `keycloak-db` aceita só pods `app.kubernetes.io/name: keycloak` |
+| `kubernetes_network_policy` | `revenda-db` aceita só pods com rótulo `app` igual a `revenda-api` ou `revenda-migracao`; `keycloak-db` aceita só pods `app=keycloak` |
 
-O arquivo de realm usa *placeholders* de variáveis de ambiente (ex.: `${GESTOR_SENHA}`) resolvidos pelo Keycloak na importação; a senha do `gestor.loja` vem do Secret `keycloak-gestor` e, portanto, não fica versionada.
+O arquivo de realm usa *placeholders* de variáveis de ambiente (ex.: `${GESTOR_PASSWORD}`) resolvidos pelo Keycloak na importação; a senha do `gestor.loja` vem do Secret `keycloak-gestor` e, portanto, não fica versionada. Como o import só cria o realm na primeira subida, o Job `keycloak-gestor-senha` (kcadm.sh) reaplica a senha do Secret de forma idempotente a cada `apply`.
 
 Fronteira de responsabilidade: o **Terraform** cuida da plataforma (cluster, namespaces, segredos, bancos, Keycloak, metrics-server), que muda raramente; o **kustomize** cuida da aplicação `revenda-api`, que muda a cada merge.
 
 ### 1.3 State: onde fica e por quê
 
-- Backend `local`, com caminho informado no `terraform init` (configuração parcial): `-backend-config="path=$HOME/.revenda/terraform/terraform.tfstate"`. `TF_DATA_DIR` também aponta para fora do repositório.
+- Backend `local`, com caminho informado no `terraform init` (configuração parcial): `-backend-config="path=$USERPROFILE/.revenda/terraform.tfstate"`. `TF_DATA_DIR` também aponta para fora do repositório.
 - O diretório fica no perfil do usuário do runner, com permissão `0700`.
 - **Por quê**: (1) o cluster só existe nesse PC, então um backend remoto não traria benefício de colaboração; (2) o state contém os segredos gerados em texto claro e, por isso, **nunca** pode ir para o repositório (lição da fase 2); (3) fora do *workspace* do runner, o state sobrevive à limpeza do checkout entre execuções.
 - Evolução: backend remoto com criptografia e *locking* (ex.: S3 + DynamoDB, GCS ou Terraform Cloud) quando houver ambiente compartilhado.
@@ -56,7 +56,7 @@ kind delete cluster --name revenda           # remove cluster e volumes
 rm -rf ~/.revenda/terraform                  # remove state (segredos serão regenerados)
 # Em seguida: GitHub > Actions > CD > Run workflow (branch main)
 # ou, localmente, em infra/terraform:
-terraform init -backend-config="path=$HOME/.revenda/terraform/terraform.tfstate"
+terraform init -backend-config="path=$USERPROFILE/.revenda/terraform.tfstate"
 terraform apply -target=kind_cluster.revenda && terraform apply
 ```
 
@@ -142,7 +142,7 @@ Os quatro jobs rodam em paralelo e são *required status checks* da `main`. O CI
 
 ### 3.3 `cd.yml` — entrega contínua
 
-Gatilhos: `push` na `main` (ou seja, PR mergeado) e `workflow_dispatch` (com input opcional `ref` para rollback). Runner: `runs-on: [self-hosted, kind-local]`. `environment: local`. `concurrency: { group: deploy-local, cancel-in-progress: false }` (deploys são enfileirados, nunca interrompidos no meio). `permissions: contents: read`.
+Gatilhos: `push` na `main` (ou seja, PR mergeado) e `workflow_dispatch` (com input opcional `ref` para rollback). Runner: `runs-on: [self-hosted, Windows, kind-local]` (PC Windows do autor, passos em Git Bash). `environment: local`. `concurrency: { group: deploy-local, cancel-in-progress: false }` (deploys são enfileirados, nunca interrompidos no meio). `permissions: contents: read`.
 
 | Passo | O que faz | Critério de sucesso |
 |---|---|---|
@@ -199,7 +199,7 @@ Seções: **O que muda e por quê**; **Como testar**; **Tipo** (feat/fix/docs/in
 | Só código revisado | O `cd.yml` dispara apenas em `push` na `main` e `workflow_dispatch`; **nenhum** workflow com `runs-on: self-hosted` reage a `pull_request` |
 | Label dedicada | Runner registrado com a label `kind-local`; somente o `cd.yml` a utiliza |
 | PRs de forks | Configuração do repositório "Require approval for all outside collaborators" para executar workflows; o repositório é público, então esse controle é obrigatório |
-| Usuário sem admin | O serviço do runner roda com um usuário dedicado, sem `sudo`. Ressalva: o usuário precisa pertencer ao grupo `docker` para usar o kind, o que na prática equivale a acesso privilegiado ao host; por isso o PC deve ser dedicado ou o runner, isolado em VM |
+| Usuário sem admin | O runner roda como o usuário Windows logado (Tarefa Agendada no logon, sem privilégio de administrador), porque precisa do Docker Desktop e do `%USERPROFILE%\.kube\config`. Ressalva: acesso ao Docker equivale, na prática, a acesso privilegiado ao host; por isso só código já revisado e mergeado na `main` roda nele, e o ideal em produção seria um runner isolado em VM |
 | Environment `local` | O job de CD usa o environment `local`, permitindo regras de proteção (ex.: restringir a branch `main`) e segredos de environment, se necessários |
 | Segredos | O runner não guarda segredos da aplicação no GitHub; os valores vêm do Terraform/cluster e são mascarados nos logs |
 | Workspace | Checkout limpo a cada execução; state do Terraform fora do workspace |

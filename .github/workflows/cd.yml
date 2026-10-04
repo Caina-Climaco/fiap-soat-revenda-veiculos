@@ -1,0 +1,252 @@
+# Entrega continua (docs/08-ci-cd-infra.md, secao 3.3; ADR-006 e ADR-010).
+# Roda SOMENTE no runner self-hosted Windows do PC do autor (labels self-hosted,
+# Windows, kind-local) e SOMENTE em push na main (PR mergeado) ou disparo manual.
+# Nenhum workflow com runner self-hosted reage a pull_request.
+# Passos em Git Bash (shell: bash). MSYS_NO_PATHCONV evita que o Git Bash converta
+# argumentos como /app ou jsonpath em caminhos do Windows.
+name: CD
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "SHA (ou branch/tag) a implantar. Vazio = commit atual da main. Use para rollback (docs/08, secao 6)."
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: deploy-local
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  deploy:
+    name: deploy
+    runs-on: [self-hosted, Windows, kind-local]
+    environment: local
+    timeout-minutes: 60
+    env:
+      MSYS_NO_PATHCONV: "1"
+      MSYS2_ARG_CONV_EXCL: "*"
+      KIND_CLUSTER: revenda
+      NS_APP: revenda
+      NS_ID: identidade
+      E2E_API_URL: http://localhost:8080
+      E2E_KEYCLOAK_URL: http://localhost:8180
+      TF_IN_AUTOMATION: "1"
+      TF_INPUT: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref || github.sha }}
+          clean: true
+          persist-credentials: false
+
+      - name: Contexto (SHA, diretorios, kubeconfig)
+        env:
+          REF_SOLICITADA: ${{ inputs.ref }}
+        run: |
+          set -euo pipefail
+          # cygpath -m => C:/Users/fulano/... (aceito pelo bash e pelos executaveis nativos)
+          winpath() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+          SHA="$(git rev-parse HEAD)"
+          PERFIL="$(winpath "${USERPROFILE:-$HOME}")"
+          STATE_DIR="${PERFIL}/.revenda"
+          WORK_TMP="$(winpath "$RUNNER_TEMP")/revenda-cd"
+          mkdir -p "$STATE_DIR" "$WORK_TMP"
+          chmod 700 "$STATE_DIR" 2>/dev/null || true
+          {
+            echo "SHA=${SHA}"
+            echo "IMAGEM=revenda-api:${SHA}"
+            echo "STATE_DIR=${STATE_DIR}"
+            echo "TF_DATA_DIR=${STATE_DIR}/terraform-data"
+            echo "KUBECONFIG=${PERFIL}/.kube/config"
+            echo "WORK_TMP=${WORK_TMP}"
+          } >> "$GITHUB_ENV"
+          echo "Implantando ${SHA} (evento: ${GITHUB_EVENT_NAME}, ref solicitada: '${REF_SOLICITADA:-}')"
+          for ferramenta in docker kind kubectl terraform curl base64 sed; do
+            command -v "$ferramenta" >/dev/null 2>&1 || { echo "::error::Ferramenta ausente no PATH do runner: $ferramenta"; exit 1; }
+          done
+          docker version --format 'docker {{.Server.Version}}'
+          kind version
+          kubectl version --client
+          terraform version
+
+      - name: Terraform (plataforma kind, namespaces, segredos, bancos, Keycloak)
+        working-directory: infra/terraform
+        run: |
+          set -euo pipefail
+          terraform init -input=false -backend-config="path=${STATE_DIR}/terraform.tfstate"
+          # Duas etapas: os providers kubernetes/helm dependem do cluster (docs/08, secao 1.4)
+          terraform apply -input=false -auto-approve -target=kind_cluster.revenda
+          terraform apply -input=false -auto-approve
+          kind export kubeconfig --name "$KIND_CLUSTER"
+          kubectl config current-context
+          kubectl get nodes -o wide
+
+      - name: Build da imagem ${{ env.IMAGEM }}
+        run: |
+          set -euo pipefail
+          if docker image inspect "$IMAGEM" >/dev/null 2>&1; then
+            echo "Imagem $IMAGEM ja existe no Docker local (reimplantacao/rollback): build reaproveitado."
+          else
+            docker build --label "org.opencontainers.image.revision=${SHA}" -t "$IMAGEM" .
+          fi
+
+      - name: Carga da imagem no kind
+        run: kind load docker-image "$IMAGEM" --name "$KIND_CLUSTER"
+
+      - name: Migracao do banco (Job revenda-migracao)
+        run: |
+          set -euo pipefail
+          kubectl -n "$NS_APP" delete job revenda-migracao --ignore-not-found --wait=true
+          manifesto="${WORK_TMP}/migracao.yaml"
+          kubectl kustomize k8s/migracao > "$manifesto"
+          # Troca a imagem neutra (revenda-api:dev ou revenda-api sem tag) pela tag do SHA
+          sed -E -i "s#^([[:space:]]*-?[[:space:]]*image:[[:space:]]*[\"']?)revenda-api(:[A-Za-z0-9._-]+)?([\"']?)[[:space:]]*\$#\1revenda-api:${SHA}\3#" "$manifesto"
+          grep -q "revenda-api:${SHA}" "$manifesto" || { echo "::error::Imagem revenda-api nao encontrada no manifesto renderizado de k8s/migracao"; exit 1; }
+          kubectl apply -n "$NS_APP" -f "$manifesto"
+          echo "Aguardando o Job (ate 300 s)..."
+          # Duas esperas em paralelo: `complete` (sucesso) e `failed` (backoffLimit esgotado),
+          # para falhar logo em vez de esperar o timeout. A decisao final vem do status do Job.
+          kubectl -n "$NS_APP" wait --for=condition=complete --timeout=300s job/revenda-migracao &
+          espera_ok=$!
+          kubectl -n "$NS_APP" wait --for=condition=failed --timeout=300s job/revenda-migracao >/dev/null 2>&1 &
+          espera_falha=$!
+          wait -n "$espera_ok" "$espera_falha" || true
+          kill "$espera_ok" "$espera_falha" 2>/dev/null || true
+          concluidos="$(kubectl -n "$NS_APP" get job revenda-migracao -o jsonpath='{.status.succeeded}' 2>/dev/null || true)"
+          if [ "${concluidos:-0}" -lt 1 ]; then
+            echo "::error::Migracao nao concluiu (Job revenda-migracao sem sucesso). Deployment NAO foi alterado."
+            kubectl -n "$NS_APP" describe job revenda-migracao || true
+            kubectl -n "$NS_APP" logs job/revenda-migracao --all-containers --tail=200 || true
+            exit 1
+          fi
+          kubectl -n "$NS_APP" logs job/revenda-migracao --all-containers --tail=50 || true
+
+      - name: Deploy da revenda-api (k8s/base)
+        run: |
+          set -euo pipefail
+          # Renderiza a base, troca a imagem neutra pela tag do SHA e aplica de uma vez.
+          # (Aplicar a base com revenda-api:dev e so depois usar `set image` criaria um
+          # ReplicaSet intermediario com imagem inexistente e quebraria o `rollout undo`.)
+          manifesto="${WORK_TMP}/base.yaml"
+          kubectl kustomize k8s/base > "$manifesto"
+          sed -E -i "s#^([[:space:]]*-?[[:space:]]*image:[[:space:]]*[\"']?)revenda-api(:[A-Za-z0-9._-]+)?([\"']?)[[:space:]]*\$#\1revenda-api:${SHA}\3#" "$manifesto"
+          grep -q "revenda-api:${SHA}" "$manifesto" || { echo "::error::Imagem revenda-api nao encontrada no manifesto renderizado de k8s/base"; exit 1; }
+          kubectl apply -f "$manifesto"
+          # Garantia idempotente (sem efeito se o apply ja definiu a mesma imagem); container `api` e contrato.
+          kubectl -n "$NS_APP" set image deployment/revenda-api "api=${IMAGEM}"
+          kubectl -n "$NS_APP" annotate deployment/revenda-api kubernetes.io/change-cause="CD ${SHA}" --overwrite
+          if ! kubectl -n "$NS_APP" rollout status deployment/revenda-api --timeout=180s; then
+            echo "::error::Rollout nao concluiu em 180 s"
+            kubectl -n "$NS_APP" get pods -o wide || true
+            kubectl -n "$NS_APP" describe deployment revenda-api || true
+            kubectl -n "$NS_APP" logs deployment/revenda-api --all-containers --tail=100 || true
+            exit 1
+          fi
+          atual="$(kubectl -n "$NS_APP" get deployment revenda-api -o jsonpath='{.spec.template.spec.containers[?(@.name=="api")].image}')"
+          [ "$atual" = "$IMAGEM" ] || { echo "::error::Deployment com imagem inesperada: '$atual' (esperada: $IMAGEM)"; exit 1; }
+          kubectl -n "$NS_APP" get deployment,pods,svc,hpa -o wide
+
+      - name: Aguarda API pronta e discovery do Keycloak
+        run: |
+          set -euo pipefail
+          esperar() {
+            local url="$1" limite="$2" inicio
+            inicio=$(date +%s)
+            until curl -fsS -o /dev/null --max-time 5 "$url"; do
+              if [ $(( $(date +%s) - inicio )) -ge "$limite" ]; then
+                echo "::error::Sem resposta 2xx de $url em ${limite} s"
+                return 1
+              fi
+              sleep 5
+            done
+            echo "OK: $url"
+          }
+          esperar "${E2E_API_URL}/health/ready" 180
+          esperar "${E2E_KEYCLOAK_URL}/realms/revenda/.well-known/openid-configuration" 300
+
+      - name: Python 3.12 para o e2e
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+
+      - name: Dependencias do e2e (pytest + httpx, isoladas do pacote revenda)
+        run: |
+          set -euo pipefail
+          python -m venv "${WORK_TMP}/e2e-venv"
+          VENV_PY="${WORK_TMP}/e2e-venv/Scripts/python.exe"
+          [ -x "$VENV_PY" ] || VENV_PY="${WORK_TMP}/e2e-venv/bin/python"
+          "$VENV_PY" -m pip install --disable-pip-version-check --quiet -r tests/e2e/requirements.txt
+          "$VENV_PY" -m pytest --version
+          echo "VENV_PY=${VENV_PY}" >> "$GITHUB_ENV"
+
+      - name: Testes ponta a ponta (pytest -m e2e)
+        id: e2e
+        run: |
+          set -euo pipefail
+          segredo() {
+            # Uso: segredo <namespace> <secret> <chave>
+            local valor
+            valor="$(kubectl -n "$1" get secret "$2" -o jsonpath="{.data.$3}" | base64 -d)"
+            if [ -z "$valor" ]; then echo "::error::Secret $1/$2 sem a chave $3" >&2; return 1; fi
+            printf '%s' "$valor"
+          }
+          E2E_GESTOR_PASSWORD="$(segredo "$NS_ID" keycloak-gestor GESTOR_PASSWORD)"
+          echo "::add-mask::${E2E_GESTOR_PASSWORD}"
+          E2E_WEBHOOK_SECRET="$(segredo "$NS_APP" revenda-webhook-secret WEBHOOK_SECRET)"
+          echo "::add-mask::${E2E_WEBHOOK_SECRET}"
+          E2E_KC_ADMIN_USER="$(segredo "$NS_ID" keycloak-admin KC_BOOTSTRAP_ADMIN_USERNAME)"
+          E2E_KC_ADMIN_PASSWORD="$(segredo "$NS_ID" keycloak-admin KC_BOOTSTRAP_ADMIN_PASSWORD)"
+          echo "::add-mask::${E2E_KC_ADMIN_PASSWORD}"
+          export E2E_GESTOR_PASSWORD E2E_WEBHOOK_SECRET E2E_KC_ADMIN_USER E2E_KC_ADMIN_PASSWORD
+          # No CD a ausencia de variaveis e erro (nunca skip silencioso).
+          export E2E_EXIGIR=1
+          # tests/e2e/pytest.ini isola a configuracao do pyproject (addopts -m "not e2e").
+          "$VENV_PY" -m pytest tests/e2e -m e2e -p no:cacheprovider -o addopts="" \
+            -v -rA --junitxml="${WORK_TMP}/e2e-junit.xml"
+
+      - name: Diagnostico em falha
+        if: ${{ failure() }}
+        run: |
+          kubectl get pods -A -o wide || true
+          kubectl -n "$NS_APP" get events --sort-by=.lastTimestamp | tail -n 40 || true
+          kubectl -n "$NS_APP" logs deployment/revenda-api --all-containers --tail=200 || true
+          kubectl -n "$NS_ID" logs deployment/keycloak --tail=80 || true
+          echo "Rollback: Actions > CD > Run workflow com ref=<sha-anterior>, ou 'kubectl -n revenda rollout undo deployment/revenda-api' (docs/08, secao 6)."
+
+      - name: Resumo da implantacao
+        if: ${{ always() }}
+        run: |
+          {
+            echo "## Deploy local (kind \`${KIND_CLUSTER}\`)"
+            echo ""
+            echo "| Item | Valor |"
+            echo "|---|---|"
+            echo "| Commit | \`${SHA:-?}\` |"
+            echo "| Imagem | \`${IMAGEM:-?}\` |"
+            echo "| Evento | ${GITHUB_EVENT_NAME} |"
+            pronto="$(kubectl -n "$NS_APP" get deployment revenda-api -o jsonpath='{.status.readyReplicas}/{.status.replicas}' 2>/dev/null || echo '?')"
+            echo "| Replicas prontas | ${pronto} |"
+            echo "| Resultado do e2e | ${{ steps.e2e.outcome || 'nao executado' }} |"
+            if [ -f "${WORK_TMP:-/nonexistent}/e2e-junit.xml" ]; then
+              linha="$(grep -o '<testsuite [^>]*>' "${WORK_TMP}/e2e-junit.xml" | head -n 1)"
+              attr() { printf '%s' "$linha" | sed -n "s/.* $1=\"\([^\"]*\)\".*/\1/p"; }
+              echo "| Testes e2e | $(attr tests) total, $(attr failures) falhas, $(attr errors) erros, $(attr skipped) pulados |"
+            fi
+            echo "| API | ${E2E_API_URL} (Swagger em ${E2E_API_URL}/docs) |"
+            echo "| Keycloak | ${E2E_KEYCLOAK_URL} |"
+            echo ""
+            echo "Rollback: Actions > CD > Run workflow com \`ref\` = SHA anterior (docs/08-ci-cd-infra.md, secao 6)."
+          } >> "$GITHUB_STEP_SUMMARY"

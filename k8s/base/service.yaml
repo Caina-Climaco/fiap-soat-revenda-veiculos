@@ -1,0 +1,19 @@
+# Publicado no host por extraPortMappings do kind: localhost:8080 -> NodePort 30080.
+apiVersion: v1
+kind: Service
+metadata:
+  name: revenda-api
+  labels:
+    app: revenda-api
+    app.kubernetes.io/name: revenda-api
+    app.kubernetes.io/part-of: revenda-veiculos
+spec:
+  type: NodePort
+  selector:
+    app: revenda-api
+  ports:
+    - name: http
+      port: 80
+      targetPort: http
+      nodePort: 30080
+      protocol: TCP

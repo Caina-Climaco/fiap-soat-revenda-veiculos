@@ -1,0 +1,269 @@
+# Integracao continua (docs/08-ci-cd-infra.md, secao 3.2; ADR-006).
+# Roda no runner hospedado do GitHub, sem segredos e sem acesso ao cluster.
+# Os nomes dos jobs `qualidade`, `testes`, `imagem` e `infra` sao required status
+# checks da main: NAO renomear. Nao usar paths-ignore: os checks obrigatorios
+# precisam rodar em todo PR (inclusive PRs so de documentacao).
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  # Um push novo no PR cancela a execucao anterior; na main nada e cancelado.
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  PYTHON_VERSION: "3.12"
+  TERRAFORM_VERSION: "~1.16"
+  KUBECONFORM_VERSION: "v0.8.0"
+  KUBECONFORM_SHA256: "9bc2bffbf71f261128533edaf912153948b7ff238f9a531ae6d34466ec287883"
+  # Versao padrao da trivy-action v0.36.0; posterior as versoes comprometidas
+  # (v0.69.4-v0.69.6, GHSA-69fq-xp46-6x23).
+  TRIVY_VERSION: "v0.70.0"
+
+jobs:
+  qualidade:
+    name: qualidade
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Dependencias (uv.lock congelado)
+        run: uv sync --frozen
+
+      - name: ruff check
+        run: uv run ruff check .
+
+      - name: ruff format --check
+        run: uv run ruff format --check .
+
+      - name: mypy
+        run: uv run mypy src
+
+      - name: Contratos de camadas e modulos (import-linter)
+        run: uv run lint-imports
+
+  testes:
+    name: testes
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: revenda
+          POSTGRES_PASSWORD: revenda
+          POSTGRES_DB: revenda_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U revenda -d revenda_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
+    env:
+      TEST_DATABASE_URL: postgresql+psycopg://revenda:revenda@localhost:5432/revenda_test
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Python ${{ env.PYTHON_VERSION }}
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ env.PYTHON_VERSION }}
+
+      - name: uv
+        uses: astral-sh/setup-uv@v10.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+
+      - name: Dependencias (uv.lock congelado)
+        run: uv sync --frozen
+
+      - name: Unidade + integracao com cobertura (minimo 80%)
+        run: >-
+          uv run pytest -m "unit or integration"
+          --cov=revenda --cov-branch
+          --cov-report=term-missing --cov-report=xml
+          --cov-fail-under=80
+
+      - name: Publica relatorio de cobertura
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: cobertura-${{ github.sha }}
+          path: coverage.xml
+          if-no-files-found: warn
+          retention-days: 14
+
+  imagem:
+    name: imagem
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Buildx
+        uses: docker/setup-buildx-action@v4
+
+      - name: Build revenda-api:${{ github.sha }} (sem push)
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          load: true
+          push: false
+          tags: revenda-api:${{ github.sha }}
+          labels: |
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # trivy-action fixada por SHA de commit (v0.36.0): em marco/2026 as tags da
+      # trivy-action foram sequestradas (GHSA-69fq-xp46-6x23); tag mutavel nao e confiavel.
+      - name: Trivy - vulnerabilidades da imagem (CRITICAL/HIGH corrigiveis)
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          scan-type: image
+          image-ref: revenda-api:${{ github.sha }}
+          severity: CRITICAL,HIGH
+          ignore-unfixed: true
+          vuln-type: os,library
+          format: table
+          exit-code: "1"
+
+      - name: Trivy - segredos no repositorio
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          version: ${{ env.TRIVY_VERSION }}
+          skip-setup-trivy: true
+          scan-type: fs
+          scan-ref: .
+          scanners: secret
+          format: table
+          exit-code: "1"
+
+  infra:
+    name: infra
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      TF_IN_AUTOMATION: "1"
+      TF_INPUT: "0"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Terraform
+        uses: hashicorp/setup-terraform@v4
+        with:
+          terraform_version: ${{ env.TERRAFORM_VERSION }}
+          terraform_wrapper: false
+
+      - name: terraform fmt -check
+        run: terraform fmt -check -recursive -diff infra/terraform
+
+      - name: terraform init (sem backend)
+        run: terraform -chdir=infra/terraform init -backend=false -input=false
+
+      - name: terraform validate
+        run: terraform -chdir=infra/terraform validate
+
+      - name: Instala kubeconform ${{ env.KUBECONFORM_VERSION }}
+        run: |
+          set -euo pipefail
+          url="https://github.com/yannh/kubeconform/releases/download/${KUBECONFORM_VERSION}/kubeconform-linux-amd64.tar.gz"
+          curl -fsSL --retry 3 -o "${RUNNER_TEMP}/kubeconform.tar.gz" "$url"
+          echo "${KUBECONFORM_SHA256}  ${RUNNER_TEMP}/kubeconform.tar.gz" | sha256sum -c -
+          tar -xzf "${RUNNER_TEMP}/kubeconform.tar.gz" -C "${RUNNER_TEMP}" kubeconform
+          echo "${RUNNER_TEMP}" >> "$GITHUB_PATH"
+
+      # Mesmo renderizador usado pelo CD (kubectl kustomize, embutido no kubectl da imagem
+      # ubuntu-latest), para o CI validar exatamente o que sera aplicado no cluster.
+      - name: kubectl kustomize + kubeconform (k8s/base e k8s/migracao)
+        run: |
+          set -euo pipefail
+          kubectl version --client
+          for dir in k8s/base k8s/migracao; do
+            echo "::group::$dir"
+            if [ ! -f "$dir/kustomization.yaml" ] && [ ! -f "$dir/kustomization.yml" ] && [ ! -f "$dir/Kustomization" ]; then
+              echo "::error::$dir sem kustomization.yaml (contrato DESIGN_BRIEF 14.4)"
+              exit 1
+            fi
+            saida="${RUNNER_TEMP}/$(echo "$dir" | tr '/' '-').yaml"
+            kubectl kustomize "$dir" > "$saida"
+            cat "$saida"
+            kubeconform -strict -ignore-missing-schemas -summary -output text "$saida"
+            echo "::endgroup::"
+          done
+
+      - name: Realm do Keycloak (JSON valido e contrato minimo)
+        run: |
+          set -euo pipefail
+          arquivo=keycloak/realm-revenda.json
+          jq empty "$arquivo"
+          verificar() {
+            if ! jq -e "$1" "$arquivo" >/dev/null; then
+              echo "::error file=${arquivo}::Contrato do realm violado: $2"
+              exit 1
+            fi
+          }
+          verificar '.realm == "revenda"' 'realm deve se chamar revenda'
+          verificar '[.roles.realm[]?.name] | index("cliente") != null' 'papel de realm cliente ausente'
+          verificar '[.roles.realm[]?.name] | index("gestor") != null' 'papel de realm gestor ausente'
+          for c in revenda-api revenda-swagger revenda-e2e; do
+            verificar "[.clients[]?.clientId] | index(\"$c\") != null" "client $c ausente"
+          done
+          verificar '.clients[] | select(.clientId == "revenda-e2e") | .directAccessGrantsEnabled == true' 'revenda-e2e precisa de directAccessGrantsEnabled'
+          echo "Realm OK"
+
+  # Valida o titulo do PR (vira a mensagem do squash na main) no formato
+  # Conventional Commits (docs/08, secao 4.3). Nao e required check.
+  titulo-pr:
+    name: titulo-pr
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 2
+    steps:
+      - name: Conventional Commits
+        env:
+          TITULO: ${{ github.event.pull_request.title }}
+        run: |
+          padrao='^(feat|fix|docs|refactor|test|chore|ci|build|perf|style|revert)(\([a-z0-9._-]+\))?!?: .+'
+          if [[ "$TITULO" =~ $padrao ]]; then
+            echo "Titulo OK: $TITULO"
+          else
+            echo "::error::Titulo do PR fora do padrao Conventional Commits: '$TITULO'. Exemplo: 'feat(vendas): efetivar venda via webhook'"
+            exit 1
+          fi

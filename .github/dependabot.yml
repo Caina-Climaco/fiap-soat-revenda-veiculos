@@ -1,0 +1,50 @@
+# Atualizacoes semanais de dependencias. Cada atualizacao chega como PR e passa
+# pelo CI obrigatorio, como qualquer outra mudanca (docs/08-ci-cd-infra.md).
+# - github-actions: versoes das actions nos workflows (a trivy-action e fixada por SHA;
+#   o Dependabot atualiza o SHA e o comentario de versao juntos).
+# - uv: pyproject.toml + uv.lock da aplicacao (o ecossistema "pip" nao entende o
+#   uv.lock e deixaria o lockfile desatualizado em relacao ao pyproject).
+# - pip: dependencias isoladas dos testes e2e (tests/e2e/requirements.txt).
+version: 2
+updates:
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: America/Sao_Paulo
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: ci
+      include: scope
+    groups:
+      actions:
+        patterns: ["*"]
+
+  - package-ecosystem: uv
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: America/Sao_Paulo
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      dev:
+        dependency-type: development
+      producao:
+        dependency-type: production
+        update-types: [minor, patch]
+
+  - package-ecosystem: pip
+    directory: /tests/e2e
+    schedule:
+      interval: weekly
+      day: monday
+      timezone: America/Sao_Paulo
+    open-pull-requests-limit: 2
+    commit-message:
+      prefix: test
+      include: scope

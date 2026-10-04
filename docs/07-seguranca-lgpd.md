@@ -182,7 +182,7 @@ Os direitos são atendidos no contexto **Identidade**, onde estão os dados pess
 | Direito (art. 18) | Como é atendido |
 |---|---|
 | Confirmação da existência de tratamento e acesso aos dados (I e II) | Console de conta do Keycloak (`/realms/revenda/account`): o titular vê os dados do seu cadastro. As compras ficam visíveis em `GET /api/v1/vendas/minhas` |
-| Correção de dados incompletos, inexatos ou desatualizados (III) | O titular edita nome, telefone e e-mail no console de conta; alterações de CPF passam pelo administrador (verificação de identidade) |
+| Correção de dados incompletos, inexatos ou desatualizados (III) | O titular edita nome, telefone, e-mail e CPF no console de conta do Keycloak (o perfil declarativo não permite tornar um atributo editável só no cadastro; em produção, a alteração de CPF exigiria verificação de identidade) |
 | Anonimização, bloqueio ou eliminação de dados desnecessários, excessivos ou tratados em desconformidade (IV) | Administrador do realm pode desabilitar (bloquear) ou excluir o usuário |
 | Eliminação (VI) e término do tratamento (arts. 15 e 16) | Exclusão da conta pelo próprio titular (ação "Delete Account" habilitada no realm) ou pelo administrador |
 | Portabilidade (V) e informação sobre compartilhamento (VII) | Fora do escopo técnico desta entrega; atendidos por procedimento administrativo (exportação do usuário pela API admin do Keycloak) |
