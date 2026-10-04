@@ -1,25 +1,39 @@
 # 08 — CI/CD e infraestrutura
 
-Este documento descreve como o ambiente é criado e como o código chega a ele: a infraestrutura como código com Terraform (cluster kind, namespaces, bancos, Keycloak e segredos), os manifestos Kubernetes da aplicação com kustomize, os pipelines de integração e entrega contínuas no GitHub Actions, as regras de governança do repositório, a segurança do runner self-hosted e o procedimento de rollback. A premissa do enunciado é que toda mudança, de implantação ou de código, passa por Pull Request e pipeline. As decisões estão nos [ADR-005](adrs/ADR-005-kind-terraform-nodeport.md), [ADR-006](adrs/ADR-006-ci-hospedado-cd-self-hosted.md), [ADR-010](adrs/ADR-010-kind-load-sem-registry.md) e [ADR-011](adrs/ADR-011-segredos-terraform.md).
+Este documento descreve como o ambiente é criado e como o código chega a ele: a infraestrutura como código (cluster kind criado pela CLI `kind`; namespaces, bancos, Keycloak e segredos pelo Terraform), os manifestos Kubernetes da aplicação com kustomize, os pipelines de integração e entrega contínuas no GitHub Actions, as regras de governança do repositório, a segurança do runner self-hosted e o procedimento de rollback. A premissa do enunciado é que toda mudança, de implantação ou de código, passa por Pull Request e pipeline. As decisões estão nos [ADR-005](adrs/ADR-005-kind-terraform-nodeport.md), [ADR-006](adrs/ADR-006-ci-hospedado-cd-self-hosted.md), [ADR-010](adrs/ADR-010-kind-load-sem-registry.md) e [ADR-011](adrs/ADR-011-segredos-terraform.md).
 
-## 1. Infraestrutura como código (Terraform)
+## 1. Infraestrutura como código (CLI kind + Terraform)
+
+O **cluster** é criado pela CLI `kind` a partir de `infra/kind/cluster.yaml`, e não pelo Terraform. O provider comunitário `tehcyx/kind` não tem assinatura de código e foi bloqueado pelo Smart App Control do Windows 11 no PC do runner ([ADR-005](adrs/ADR-005-kind-terraform-nodeport.md)). O arquivo define:
+
+- o nome `revenda` e um nó control-plane;
+- a imagem do nó, `kindest/node:v1.34.11`, fixada por digest (release kind v0.33.0);
+- `podSubnet: 10.244.0.0/16`;
+- os `extraPortMappings` em `127.0.0.1`: `30080 → 8080` (API), `30180 → 8180` (Keycloak) e `30432 → 15432` (`revenda-db`, só responde com `expor_banco_revenda = true`).
+
+A criação é idempotente, no CD e em `scripts/windows/04-subir-ambiente.ps1`:
+
+```bash
+kind get clusters | grep -qx revenda || kind create cluster --config infra/kind/cluster.yaml --wait 120s
+kind export kubeconfig --name revenda      # contexto kind-revenda usado pelos providers
+```
+
+Todo o resto (o que fica **dentro** do cluster) é Terraform.
 
 ### 1.1 Providers
 
 | Provider | Uso |
 |---|---|
-| `tehcyx/kind` | Cria o cluster kind `revenda` com `extraPortMappings` |
 | `hashicorp/kubernetes` | Namespaces, Secrets, ConfigMaps, StatefulSets, Deployments, Services, NetworkPolicies |
 | `hashicorp/helm` | Instala o `metrics-server` (necessário para o HPA) |
 | `hashicorp/random` | Gera as senhas e o segredo do webhook (`random_password`) |
 
-As versões dos providers são fixadas em `versions.tf` (`required_providers` com restrição `~>`) e o `.terraform.lock.hcl` é versionado.
+As versões dos providers são fixadas em `versions.tf` (`required_providers` com restrição `~>`) e o `.terraform.lock.hcl` é versionado. Os três providers são assinados pela HashiCorp. `kubernetes` e `helm` usam `config_path` (padrão `~/.kube/config`, variável `kubeconfig_path`) e `config_context = "kind-revenda"`.
 
 ### 1.2 Recursos
 
 | Recurso | Detalhe |
 |---|---|
-| `kind_cluster.revenda` | 1 nó control-plane; `extraPortMappings`: `30080 → host 8080` (API) e `30180 → host 8180` (Keycloak). Banco não exposto por padrão |
 | `kubernetes_namespace` | `revenda` e `identidade` |
 | `helm_release.metrics_server` | Chart `metrics-server` em `kube-system`, com `--kubelet-insecure-tls` (certificados autoassinados do kubelet no kind) |
 | `random_password` | `revenda_db`, `keycloak_db`, `keycloak_admin`, `keycloak_gestor`, `webhook_secret` (32+ caracteres) |
@@ -31,7 +45,7 @@ As versões dos providers são fixadas em `versions.tf` (`required_providers` co
 
 O arquivo de realm usa *placeholders* de variáveis de ambiente (ex.: `${GESTOR_PASSWORD}`) resolvidos pelo Keycloak na importação; a senha do `gestor.loja` vem do Secret `keycloak-gestor` e, portanto, não fica versionada. Como o import só cria o realm na primeira subida, o Job `keycloak-gestor-senha` (kcadm.sh) reaplica a senha do Secret de forma idempotente a cada `apply`.
 
-Fronteira de responsabilidade: o **Terraform** cuida da plataforma (cluster, namespaces, segredos, bancos, Keycloak, metrics-server), que muda raramente; o **kustomize** cuida da aplicação `revenda-api`, que muda a cada merge.
+Fronteira de responsabilidade: a **CLI kind** cria o cluster; o **Terraform** cuida do restante da plataforma (namespaces, segredos, bancos, Keycloak, metrics-server), que muda raramente; o **kustomize** cuida da aplicação `revenda-api`, que muda a cada merge.
 
 ### 1.3 State: onde fica e por quê
 
@@ -40,24 +54,21 @@ Fronteira de responsabilidade: o **Terraform** cuida da plataforma (cluster, nam
 - **Por quê**: (1) o cluster só existe nesse PC, então um backend remoto não traria benefício de colaboração; (2) o state contém os segredos gerados em texto claro e, por isso, **nunca** pode ir para o repositório (lição da fase 2); (3) fora do *workspace* do runner, o state sobrevive à limpeza do checkout entre execuções.
 - Evolução: backend remoto com criptografia e *locking* (ex.: S3 + DynamoDB, GCS ou Terraform Cloud) quando houver ambiente compartilhado.
 
-### 1.4 Aplicação em duas etapas
+### 1.4 Uma única aplicação
 
-Os providers `kubernetes` e `helm` são configurados com as saídas do recurso `kind_cluster` (endpoint e certificados). Para evitar o problema de providers que dependem de um recurso ainda inexistente, o CD aplica em duas etapas, ambas idempotentes:
-
-```bash
-terraform apply -auto-approve -target=kind_cluster.revenda
-terraform apply -auto-approve
-```
+Como o cluster já existe quando o Terraform roda, os providers só leem o kubeconfig e o CD executa um único `terraform apply -auto-approve`, sem `-target`. O `terraform destroy` remove o conteúdo do cluster, mas não o cluster: ele é apagado por `kind delete cluster --name revenda` (`scripts/windows/05-destruir-ambiente.ps1` faz os dois e remove o state).
 
 ### 1.5 Recriar o ambiente do zero
 
 ```bash
+# Windows: scripts\windows\05-destruir-ambiente.ps1 e depois 04-subir-ambiente.ps1, ou:
 kind delete cluster --name revenda           # remove cluster e volumes
-rm -rf ~/.revenda/terraform                  # remove state (segredos serão regenerados)
+rm -f ~/.revenda/terraform.tfstate*          # remove state (segredos serão regenerados)
 # Em seguida: GitHub > Actions > CD > Run workflow (branch main)
-# ou, localmente, em infra/terraform:
-terraform init -backend-config="path=$USERPROFILE/.revenda/terraform.tfstate"
-terraform apply -target=kind_cluster.revenda && terraform apply
+# ou, localmente:
+kind create cluster --config infra/kind/cluster.yaml --wait 120s
+terraform -chdir=infra/terraform init -backend-config="path=$USERPROFILE/.revenda/terraform.tfstate"
+terraform -chdir=infra/terraform apply
 ```
 
 Depois de recriado, o CD reconstrói a imagem, carrega no kind, aplica a migração e os manifestos. Os dados anteriores são perdidos (ambiente acadêmico).
@@ -120,10 +131,10 @@ flowchart LR
   merge --> cd["CD (self-hosted, kind-local)<br/>environment local"]
   subgraph CDJOB["Job deploy"]
     direction TB
-    tf["terraform apply"] --> build["docker build<br/>revenda-api:SHA"] --> load["kind load docker-image"]
+    kc["kind create cluster<br/>(se faltar)"] --> tf["terraform apply"] --> build["docker build<br/>revenda-api:SHA"] --> load["kind load docker-image"]
     load --> mig["Job de migração<br/>wait complete"] --> roll["kubectl apply -k k8s/base<br/>rollout status"] --> e2e["pytest -m e2e<br/>localhost:8080 / 8180"] --> sum["Resumo no<br/>job summary"]
   end
-  cd --> tf
+  cd --> kc
   e2e -->|"falhou"| rb["Rollback<br/>(seção 6)"]
 ```
 
@@ -136,7 +147,7 @@ Gatilhos: `pull_request` para `main` e `push` na `main`. Runner: `ubuntu-latest`
 | `qualidade` | Checkout; setup Python 3.12 com cache; instala dependências; `ruff check`; `ruff format --check`; `mypy src`; `lint-imports` (contratos de camadas e módulos) | Erro de lint, formatação, tipagem ou violação da regra de dependência |
 | `testes` | *Service container* `postgres:16`; `alembic upgrade head`; `pytest tests/unit tests/integration --cov=revenda --cov-fail-under=80`; publica relatório de cobertura como artefato | Teste falho ou cobertura < 80% |
 | `imagem` | `docker build` (tag `revenda-api:${{ github.sha }}`, sem push); Trivy na imagem (`severity: CRITICAL,HIGH`, `ignore-unfixed: true`, `exit-code: 1`); Trivy `fs` com scanner `secret` no repositório | Vulnerabilidade crítica/alta corrigível ou segredo detectado |
-| `infra` | `terraform fmt -check -recursive`; `terraform init -backend=false`; `terraform validate`; `kustomize build k8s/base` e `k8s/migracao` validados com `kubeconform -strict` | Formatação, configuração inválida ou manifesto fora do schema |
+| `infra` | `terraform fmt -check -recursive`; `terraform init -backend=false`; `terraform validate`; `infra/kind/cluster.yaml` validado com `yq` (YAML válido, os três `extraPortMappings`, imagem por digest); `kustomize build k8s/base` e `k8s/migracao` validados com `kubeconform -strict` | Formatação, configuração inválida ou manifesto fora do schema |
 
 Os quatro jobs rodam em paralelo e são *required status checks* da `main`. O CI não tem acesso a segredos nem ao cluster.
 
@@ -147,13 +158,14 @@ Gatilhos: `push` na `main` (ou seja, PR mergeado) e `workflow_dispatch` (com inp
 | Passo | O que faz | Critério de sucesso |
 |---|---|---|
 | 1. Checkout | `actions/checkout` do SHA do push (ou do `ref` informado) | — |
-| 2. Terraform | `init` com backend local fora do repo; `apply -target=kind_cluster.revenda`; `apply` completo | Plataforma convergida (idempotente) |
-| 3. Build | `docker build -t revenda-api:${SHA} .` | Imagem construída |
-| 4. Carga no kind | `kind load docker-image revenda-api:${SHA} --name revenda` | Imagem disponível no nó |
-| 5. Migração | `kubectl delete job revenda-migracao --ignore-not-found`; `kustomize edit set image` em `k8s/migracao`; `kubectl apply -k k8s/migracao`; `kubectl wait --for=condition=complete --timeout=300s` | Job `Complete`; em falha, imprime `kubectl logs job/revenda-migracao` e encerra **sem** alterar o Deployment |
-| 6. Deploy | `kustomize edit set image` em `k8s/base`; `kubectl apply -k k8s/base`; `kubectl rollout status deployment/revenda-api --timeout=180s` | Todas as réplicas novas *ready* |
-| 7. Smoke e e2e | Aguarda `GET localhost:8080/health/ready` e o discovery do Keycloak em `localhost:8180`; lê o segredo do webhook e a senha do gestor dos Secrets via `kubectl` (mascarados com `::add-mask::`); `pytest -m e2e` | Fluxo início-a-fim verde ([09-testes.md](09-testes.md)) |
-| 8. Resumo | Escreve no `$GITHUB_STEP_SUMMARY`: SHA implantado, imagem, réplicas, resultado do e2e, URLs locais | — |
+| 2. Cluster kind | Se `kind get clusters` não lista `revenda`: `kind create cluster --config infra/kind/cluster.yaml --wait 120s`; depois `kind export kubeconfig --name revenda` | Contexto `kind-revenda` no kubeconfig |
+| 3. Terraform | `init` com backend local fora do repo; um único `apply` | Plataforma convergida (idempotente) |
+| 4. Build | `docker build -t revenda-api:${SHA} .` | Imagem construída |
+| 5. Carga no kind | `kind load docker-image revenda-api:${SHA} --name revenda` | Imagem disponível no nó |
+| 6. Migração | `kubectl delete job revenda-migracao --ignore-not-found`; `kustomize edit set image` em `k8s/migracao`; `kubectl apply -k k8s/migracao`; `kubectl wait --for=condition=complete --timeout=300s` | Job `Complete`; em falha, imprime `kubectl logs job/revenda-migracao` e encerra **sem** alterar o Deployment |
+| 7. Deploy | `kustomize edit set image` em `k8s/base`; `kubectl apply -k k8s/base`; `kubectl rollout status deployment/revenda-api --timeout=180s` | Todas as réplicas novas *ready* |
+| 8. Smoke e e2e | Aguarda `GET localhost:8080/health/ready` e o discovery do Keycloak em `localhost:8180`; lê o segredo do webhook e a senha do gestor dos Secrets via `kubectl` (mascarados com `::add-mask::`); `pytest -m e2e` | Fluxo início-a-fim verde ([09-testes.md](09-testes.md)) |
+| 9. Resumo | Escreve no `$GITHUB_STEP_SUMMARY`: SHA implantado, imagem, réplicas, resultado do e2e, URLs locais | — |
 
 Se o e2e falhar após o rollout, o job falha (deploy marcado como vermelho) e o autor executa o rollback da seção 6. O rollback não é automático para preservar o estado para diagnóstico.
 

@@ -19,23 +19,32 @@
 
 ## Decisão
 
-O Terraform (`infra/terraform`) provisiona **tudo o que é plataforma**:
-- cluster kind `revenda`, com `extraPortMappings` (host 8080 → NodePort 30080 da API; host 8180 → NodePort 30180 do Keycloak);
-- namespaces `revenda` e `identidade`;
-- metrics-server (via Helm);
-- as duas instâncias PostgreSQL e o Keycloak;
-- os Secrets gerados.
+O cluster e o seu conteúdo são definidos por código, em duas partes:
+
+- **Cluster:** criado pela **CLI `kind`** a partir de `infra/kind/cluster.yaml`. O arquivo define o cluster `revenda`, com um nó control-plane, a imagem do nó fixada por digest, o `podSubnet` e os `extraPortMappings` em 127.0.0.1: host 8080 → NodePort 30080 (API), host 8180 → NodePort 30180 (Keycloak) e host 15432 → NodePort 30432 (`revenda-db`, opcional). A criação é idempotente: o CD e o script `scripts/windows/04-subir-ambiente.ps1` só rodam `kind create cluster --config infra/kind/cluster.yaml --wait 120s` quando `kind get clusters` não lista `revenda`.
+- **Conteúdo do cluster:** o **Terraform** (`infra/terraform`, providers `kubernetes`, `helm` e `random`) gerencia:
+  - namespaces `revenda` e `identidade`;
+  - metrics-server (via Helm);
+  - as duas instâncias PostgreSQL e o Keycloak;
+  - os Secrets gerados e as NetworkPolicies.
+
+  Os providers usam o contexto `kind-revenda` do kubeconfig.
+
+**Por que o cluster não é criado pelo Terraform:** o plano inicial usava o provider comunitário `tehcyx/kind`. No PC Windows 11 do autor, o binário `terraform-provider-kind.exe` não tem assinatura de código e foi bloqueado pelo **Smart App Control** ("An Application Control policy has blocked this file"). Desligar o Smart App Control foi descartado. Os providers da HashiCorp e as CLIs `kind`, `kubectl` e `docker` têm assinatura válida e executam normalmente. A CLI `kind` já era requisito do CD (`kind load docker-image`), então a mudança não acrescenta ferramenta.
 
 A aplicação é implantada pelos manifestos em `k8s/` (kustomize) no pipeline de CD. Os serviços são expostos por **NodePort**.
 
 ## Consequências
 
 ### Positivas
-- Ambiente recriável do zero com `terraform apply`. Corrige a lacuna da Fase 2.
+- Ambiente recriável do zero com `kind create cluster --config infra/kind/cluster.yaml` seguido de `terraform apply`, ambos automatizados no CD e no script 04. Corrige a lacuna da Fase 2.
+- Um único `terraform apply`, sem `-target`: o cluster já existe antes do plano, e os providers só leem o kubeconfig.
+- Nenhum binário sem assinatura no caminho do deploy, o que é compatível com o Smart App Control do Windows 11.
 - Sem port-forward manual: a API fica em `http://localhost:8080` e o Keycloak em `http://localhost:8180`.
 
 ### Negativas
 - O state do Terraform fica local, na máquina do runner.
+- O cluster fica fora do state do Terraform. Mudar `infra/kind/cluster.yaml` (portas, imagem do nó) só tem efeito recriando o cluster (`scripts/windows/05-destruir-ambiente.ps1` e depois `04-subir-ambiente.ps1`), e o `terraform destroy` não apaga o cluster (o script 05 roda `kind delete cluster` em seguida).
 - NodePort não oferece TLS nem roteamento por host.
 
 ## Mitigações

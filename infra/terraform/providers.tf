@@ -1,25 +1,22 @@
-# Os providers kubernetes e helm sao configurados com as saidas do kind_cluster.
-# Na primeira execucao esses valores so existem depois que o cluster e criado; os
-# recursos tipados (*_v1) e o helm_release aceitam isso porque o cliente so e
-# inicializado no apply. Para eliminar qualquer risco, o CD e o script
-# 04-subir-ambiente.ps1 aplicam em duas etapas (docs/08-ci-cd-infra.md, secao 1.4):
-#   terraform apply -target=kind_cluster.revenda
-#   terraform apply
+# O cluster kind e criado FORA do Terraform, pela CLI kind (infra/kind/cluster.yaml), no
+# CD e em scripts/windows/04-subir-ambiente.ps1 (ADR-005). Os providers usam o contexto
+# kind-<cluster> do kubeconfig que o `kind create cluster` / `kind export kubeconfig`
+# grava. Como o cluster ja existe antes do plan, basta um unico `terraform apply`.
 
-provider "kind" {}
+locals {
+  # Vazio = ~/.kube/config (no Windows, %USERPROFILE%\.kube\config)
+  kubeconfig_path = var.kubeconfig_path != "" ? var.kubeconfig_path : pathexpand("~/.kube/config")
+  kube_contexto   = "kind-${var.cluster_nome}"
+}
 
 provider "kubernetes" {
-  host                   = kind_cluster.revenda.endpoint
-  client_certificate     = kind_cluster.revenda.client_certificate
-  client_key             = kind_cluster.revenda.client_key
-  cluster_ca_certificate = kind_cluster.revenda.cluster_ca_certificate
+  config_path    = local.kubeconfig_path
+  config_context = local.kube_contexto
 }
 
 provider "helm" {
   kubernetes = {
-    host                   = kind_cluster.revenda.endpoint
-    client_certificate     = kind_cluster.revenda.client_certificate
-    client_key             = kind_cluster.revenda.client_key
-    cluster_ca_certificate = kind_cluster.revenda.cluster_ca_certificate
+    config_path    = local.kubeconfig_path
+    config_context = local.kube_contexto
   }
 }

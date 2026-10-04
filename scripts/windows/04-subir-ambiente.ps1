@@ -1,11 +1,14 @@
-# Sobe a plataforma local com Terraform: cluster kind "revenda", namespaces, segredos,
-# bancos, Keycloak e metrics-server (infra/terraform; docs/08-ci-cd-infra.md, secao 1).
+# Sobe a plataforma local: cria o cluster kind "revenda" com a CLI kind, se faltar
+# (infra/kind/cluster.yaml), e aplica o Terraform com o que fica dentro do cluster:
+# namespaces, segredos, bancos, Keycloak e metrics-server (docs/08-ci-cd-infra.md, secao 1).
 # A aplicacao (revenda-api) e implantada pelo CD (.github/workflows/cd.yml).
+# O cluster NAO e criado pelo Terraform: o provider tehcyx/kind nao tem assinatura de
+# codigo e e bloqueado pelo Smart App Control do Windows 11 (ADR-005).
 #
 # Uso:
 #   powershell -ExecutionPolicy Bypass -File .\scripts\windows\04-subir-ambiente.ps1 [-SemBancoExposto] [-Recriar]
 #     -SemBancoExposto  nao publica o revenda-db em localhost:15432
-#     -Recriar          apaga o cluster e o state antes (ambiente do zero; dados perdidos)
+#     -Recriar          apaga o cluster e o state antes (ambiente do zero; dados e senhas novos)
 #
 # State: %USERPROFILE%\.revenda\terraform.tfstate e TF_DATA_DIR em
 # %USERPROFILE%\.revenda\terraform-data -- os MESMOS caminhos usados pelo cd.yml, entao o
@@ -17,6 +20,9 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+# Recarrega o PATH do registro: ferramentas instaladas pelo winget nesta sessao
+# (kind, terraform) so aparecem em janelas novas do PowerShell.
+$env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User") + ";" + $env:Path
 $raiz = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
 $tfDir = Join-Path $raiz "infra\terraform"
 $log = Join-Path $raiz ".setup\relatorio-ambiente-subir.txt"
@@ -75,47 +81,38 @@ $env:TF_VAR_kubeconfig_path = "$perfil/.kube/config"
 $env:TF_VAR_expor_banco_revenda = if ($SemBancoExposto) { "false" } else { "true" }
 Write-Host "State: $statePath | TF_DATA_DIR: $env:TF_DATA_DIR | KUBECONFIG: $env:KUBECONFIG"
 
-# ------------------------------------------------------------------ coerencia cluster x state
-$temCluster = (ClustersKind) -contains "revenda"
-$stateTemCluster = (Test-Path $statePath) -and ((Get-Content -Path $statePath -Raw) -match '"type":\s*"kind_cluster"')
+# ------------------------------------------------------------------ cluster (CLI kind)
+$configKind = Join-Path $raiz "infra\kind\cluster.yaml"
+if (-not (Test-Path $configKind)) { Falhar "arquivo $configKind nao encontrado." }
 
 if ($Recriar) {
     Write-Host "-Recriar: apagando o cluster e o state (dados dos bancos serao perdidos)"
-    if ($temCluster) {
+    if ((ClustersKind) -contains "revenda") {
         if ((Invocar "kind" @("delete", "cluster", "--name", "revenda")) -ne 0) { Falhar "kind delete cluster falhou." }
     }
-    Remove-Item -Path "$statePath*" -Force -ErrorAction SilentlyContinue
-    $temCluster = $false
-    $stateTemCluster = $false
+    Remove-Item -Path $statePath, "$statePath.backup" -Force -ErrorAction SilentlyContinue
 }
 
-if ($stateTemCluster -and -not $temCluster) {
-    # O provider tehcyx/kind falha no refresh se o cluster sumiu (ex.: kind delete manual).
-    # Sem cluster nao ha mais nada a preservar: o state e arquivado e o ambiente recriado
-    # (os segredos serao gerados de novo).
-    $arquivo = "$statePath.orfao-$(Get-Date -Format yyyyMMddHHmmss)"
-    Write-Host "AVISO: o state cita o cluster 'revenda', mas ele nao existe. Arquivando o state em $arquivo"
-    Move-Item -Path $statePath -Destination $arquivo -Force
-    Remove-Item -Path "$statePath.backup" -Force -ErrorAction SilentlyContinue
+# Idempotente: so cria se `kind get clusters` nao listar "revenda". Se o cluster foi
+# recriado com o state antigo, o Terraform percebe no refresh que os recursos sumiram e
+# os cria de novo (mantendo as senhas do state).
+if ((ClustersKind) -contains "revenda") {
+    Write-Host "Cluster kind 'revenda' ja existe (nada a criar)."
+} else {
+    $codigo = Invocar "kind" @("create", "cluster", "--config", $configKind, "--wait", "120s")
+    if ($codigo -ne 0) { Falhar "kind create cluster falhou (codigo $codigo)." }
 }
-if ($temCluster -and -not $stateTemCluster) {
-    Falhar ("o cluster kind 'revenda' existe, mas nao esta no state $statePath (criado fora do Terraform " +
-        "ou state perdido). Rode de novo com -Recriar (apaga o cluster) ou use 05-destruir-ambiente.ps1.")
-}
+# Grava/atualiza o contexto kind-revenda no KUBECONFIG usado pelos providers do Terraform
+if ((Invocar "kind" @("export", "kubeconfig", "--name", "revenda")) -ne 0) { Falhar "kind export kubeconfig falhou." }
 
 # ------------------------------------------------------------------ terraform
 $codigo = Invocar "terraform" @("-chdir=$tfDir", "init", "-input=false", "-no-color", "-reconfigure", "-backend-config=path=$statePath")
 if ($codigo -ne 0) { Falhar "terraform init falhou (codigo $codigo)." }
 
-# Duas etapas: os providers kubernetes/helm usam as saidas do cluster (docs/08, secao 1.4)
-$codigo = Invocar "terraform" @("-chdir=$tfDir", "apply", "-input=false", "-no-color", "-auto-approve", "-target=kind_cluster.revenda")
-if ($codigo -ne 0) { Falhar "terraform apply (cluster) falhou (codigo $codigo)." }
-
 $codigo = Invocar "terraform" @("-chdir=$tfDir", "apply", "-input=false", "-no-color", "-auto-approve")
 if ($codigo -ne 0) { Falhar "terraform apply falhou (codigo $codigo). Diagnostico: kubectl get pods -A" }
 
 # ------------------------------------------------------------------ verificacao
-if ((Invocar "kind" @("export", "kubeconfig", "--name", "revenda")) -ne 0) { Falhar "kind export kubeconfig falhou." }
 $null = Invocar "kubectl" @("config", "current-context")
 $null = Invocar "kubectl" @("get", "nodes", "-o", "wide")
 $null = Invocar "kubectl" @("get", "pods", "-A", "-o", "wide")

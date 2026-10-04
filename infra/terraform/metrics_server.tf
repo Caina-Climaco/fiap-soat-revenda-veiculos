@@ -19,6 +19,4 @@ resource "helm_release" "metrics_server" {
 
   wait    = true
   timeout = 300
-
-  depends_on = [kind_cluster.revenda]
 }

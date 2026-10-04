@@ -1,6 +1,6 @@
 # keycloak — realm `revenda`
 
-`realm-revenda.json` é importado pelo Keycloak 26.4 na inicialização (`start-dev --import-realm`), a partir do ConfigMap `keycloak-realm-revenda` (Terraform) ou do volume do `docker-compose.yml`.
+`realm-revenda.json` é importado pelo Keycloak 26.7 na inicialização (`start-dev --import-realm`), a partir do ConfigMap `keycloak-realm-revenda` (Terraform) ou do volume do `docker-compose.yml`.
 
 | Item | Configuração |
 |---|---|

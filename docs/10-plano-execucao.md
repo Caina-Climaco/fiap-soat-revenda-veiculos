@@ -55,7 +55,7 @@ Cada história vira uma ou mais issues no GitHub e é entregue por Pull Request.
 
 | ID | História | Critérios de aceite |
 |---|---|---|
-| HU-21 | Como operador, quero o cluster provisionado por código | `terraform apply` cria cluster kind `revenda`, namespaces `revenda` e `identidade`, metrics-server, secrets com senhas aleatórias; `fmt` e `validate` limpos |
+| HU-21 | Como operador, quero o cluster provisionado por código | `kind create cluster --config infra/kind/cluster.yaml` cria o cluster `revenda` (idempotente no CD e no script 04); `terraform apply` cria namespaces `revenda` e `identidade`, metrics-server, secrets com senhas aleatórias; `fmt` e `validate` limpos |
 | HU-22 | Como operador, quero o Keycloak isolado | Keycloak e seu PostgreSQL no namespace `identidade`, realm importado do ConfigMap; acessível em `http://localhost:8180` |
 | HU-23 | Como operador, quero a API implantada com boas práticas | Deployment com 2 réplicas, probes, *resources*, usuário não root, FS somente leitura; Service NodePort 30080 (host 8080); HPA 2..5; Job de migração |
 
@@ -64,7 +64,7 @@ Cada história vira uma ou mais issues no GitHub e é entregue por Pull Request.
 | ID | História | Critérios de aceite |
 |---|---|---|
 | HU-24 | Como autor, quero CI em todo PR | `ci.yml`: ruff, mypy, pytest unit + integration com cobertura ≥ 80%, build, Trivy, `terraform fmt`/`validate`, kubeconform; obrigatório na proteção da `main` |
-| HU-25 | Como autor, quero deploy automático ao mergear | `cd.yml` no runner `kind-local`: terraform apply, build `revenda-api:<sha>`, `kind load`, kustomize apply, Job de migração, rollout, e2e e resumo no job summary |
+| HU-25 | Como autor, quero deploy automático ao mergear | `cd.yml` no runner `kind-local`: cluster kind (se faltar), terraform apply, build `revenda-api:<sha>`, `kind load`, kustomize apply, Job de migração, rollout, e2e e resumo no job summary |
 | HU-26 | Como autor, quero o runner self-hosted seguro | Runner com label `kind-local`; CD só em push na `main` e `workflow_dispatch`; PRs de fork exigem aprovação para rodar workflows |
 
 ### EP-08 — Qualidade e entrega
@@ -145,7 +145,7 @@ Folga: não há dia livre no cronograma; a mitigação é a ordem de prioridade 
 |---|---|---|---|---|---|
 | R-01 | PC do autor desligado ou suspenso impede o CD (runner self-hosted offline) e o job fica na fila | Média | Médio | Desativar suspensão durante as janelas de trabalho; runner instalado como serviço que inicia com o sistema; `workflow_dispatch` para reexecutar o deploy | Ligar o PC e reexecutar o workflow; o job enfileirado expira e é disparado de novo manualmente |
 | R-02 | Consumo de memória do Keycloak (JVM) esgota recursos do PC junto com cluster, IDE e gravação de vídeo | Alta | Médio | `limits` de memória definidos (1 GiB) e `JAVA_OPTS_KC_HEAP` ajustado; cluster de um nó; fechar aplicações pesadas durante a gravação | Reduzir réplicas da API para 1 durante a gravação, documentando o motivo |
-| R-03 | Mudança de versão dos providers Terraform (`tehcyx/kind`, `helm`, `kubernetes`) quebra o `apply` | Média | Alto | Versões fixadas em `required_providers` e `.terraform.lock.hcl` versionado; atualização só por PR | Reverter o lock file para a última versão funcional |
+| R-03 | Mudança de versão ou bloqueio dos providers Terraform (`tehcyx/kind`, `helm`, `kubernetes`) quebra o `apply` | Média | Alto | Versões fixadas em `required_providers` e `.terraform.lock.hcl` versionado; atualização só por PR | Reverter o lock file para a última versão funcional. **Materializado em 03/10/2026:** o `terraform-provider-kind.exe` (comunitário, sem assinatura de código) foi bloqueado pelo Smart App Control do Windows 11. **Mitigação aplicada:** o cluster passou a ser criado pela CLI `kind` (assinada, `infra/kind/cluster.yaml`) e o provider foi removido; o Terraform ficou só com `kubernetes`, `helm` e `random`, assinados pela HashiCorp ([ADR-005](adrs/ADR-005-kind-terraform-nodeport.md)) |
 | R-04 | Keycloak 26.x muda configuração (user profile, hostname, import de realm) e o realm não importa | Média | Alto | Tag de imagem fixa (sem `latest`); realm exportado da mesma versão; teste de import no docker compose antes do cluster | Ajustar o `realm-revenda.json` exportando de uma instância em execução |
 | R-05 | Suporte a NetworkPolicy no kindnet diferente do esperado | Média | Baixo | Verificar a versão do kind e testar o bloqueio com um pod de teste | Manter os manifestos e documentar a política como intenção em [07-seguranca-lgpd.md](07-seguranca-lgpd.md) |
 | R-06 | Teste de concorrência instável (depende de agendamento de threads) | Média | Médio | Barreira de sincronização, várias tentativas simultâneas (10), asserção no estado final do banco e não só nas respostas | Aumentar o número de threads e isolar o teste em marcador próprio |
@@ -153,4 +153,4 @@ Folga: não há dia livre no cronograma; a mitigação é a ordem de prioridade 
 | R-08 | Atraso no cronograma sem folga | Alta | Alto | Ordem de prioridade Must/Should/Could; histórias de no máximo um dia; documentação escrita junto com o código | Cortar itens Should/Could e registrar no README o que ficou fora |
 | R-09 | Runner self-hosted executando código não revisado | Baixa | Alto | CD só em push na `main` protegida; PRs de fork exigem aprovação; CI no runner hospedado do GitHub | Remover o runner do repositório até investigar |
 | R-10 | State local do Terraform perdido ou corrompido no PC do runner | Baixa | Médio | State fora do repositório em diretório fixo do runner, com cópia antes de cada `apply` | Recriar o cluster do zero (ambiente é descartável; dados são de demonstração) |
-| R-11 | Porta 8080 ou 8180 ocupada no host impede o mapeamento do kind | Baixa | Baixo | Portas documentadas no README e parametrizadas no Terraform | Alterar as portas via variáveis e reaplicar |
+| R-11 | Porta 8080 ou 8180 ocupada no host impede o mapeamento do kind | Baixa | Baixo | Portas documentadas no README e definidas em `infra/kind/cluster.yaml` | Alterar as portas no arquivo e recriar o cluster |

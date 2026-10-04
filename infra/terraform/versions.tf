@@ -1,4 +1,7 @@
 # Versoes do Terraform e dos providers (docs/08-ci-cd-infra.md, secao 1.1).
+# Sem provider de cluster: o kind e criado pela CLI kind (infra/kind/cluster.yaml, ADR-005).
+# Os tres providers abaixo sao assinados (Authenticode) pela HashiCorp e rodam com o
+# Smart App Control do Windows 11 ligado.
 # As restricoes "~>" aceitam apenas correcoes/minors compativeis; o arquivo
 # .terraform.lock.hcl (gerado no primeiro `terraform init`) deve ser versionado.
 
@@ -6,12 +9,6 @@ terraform {
   required_version = ">= 1.9.0"
 
   required_providers {
-    # Cria o cluster kind. Embute a biblioteca sigs.k8s.io/kind v0.31.0
-    # (independe da versao da CLI `kind` instalada no PC).
-    kind = {
-      source  = "tehcyx/kind"
-      version = "~> 0.11.0"
-    }
     # Namespaces, Secrets, ConfigMap, StatefulSets, Deployment, Services e NetworkPolicies
     # (recursos tipados *_v1; a serie 3.x deprecou os recursos sem sufixo).
     kubernetes = {

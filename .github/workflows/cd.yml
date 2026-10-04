@@ -71,6 +71,7 @@ jobs:
             echo "STATE_DIR=${STATE_DIR}"
             echo "TF_DATA_DIR=${STATE_DIR}/terraform-data"
             echo "KUBECONFIG=${PERFIL}/.kube/config"
+            echo "TF_VAR_kubeconfig_path=${PERFIL}/.kube/config"
             echo "WORK_TMP=${WORK_TMP}"
           } >> "$GITHUB_ENV"
           echo "Implantando ${SHA} (evento: ${GITHUB_EVENT_NAME}, ref solicitada: '${REF_SOLICITADA:-}')"
@@ -82,17 +83,28 @@ jobs:
           kubectl version --client
           terraform version
 
-      - name: Terraform (plataforma kind, namespaces, segredos, bancos, Keycloak)
+      # O cluster e criado pela CLI kind, nao pelo Terraform: o provider tehcyx/kind nao
+      # tem assinatura de codigo e e bloqueado pelo Smart App Control do Windows 11 (ADR-005).
+      - name: Cluster kind (cria se nao existir)
+        run: |
+          set -euo pipefail
+          clusters="$(kind get clusters 2>/dev/null | tr -d '\r' || true)"
+          if printf '%s\n' "$clusters" | grep -qx "$KIND_CLUSTER"; then
+            echo "Cluster kind '$KIND_CLUSTER' ja existe."
+          else
+            kind create cluster --config infra/kind/cluster.yaml --wait 120s
+          fi
+          kind export kubeconfig --name "$KIND_CLUSTER"
+          kubectl config current-context
+          kubectl get nodes -o wide
+
+      - name: Terraform (namespaces, segredos, bancos, Keycloak, metrics-server)
         working-directory: infra/terraform
         run: |
           set -euo pipefail
           terraform init -input=false -backend-config="path=${STATE_DIR}/terraform.tfstate"
-          # Duas etapas: os providers kubernetes/helm dependem do cluster (docs/08, secao 1.4)
-          terraform apply -input=false -auto-approve -target=kind_cluster.revenda
+          # Os providers kubernetes/helm usam o contexto kind-revenda do KUBECONFIG
           terraform apply -input=false -auto-approve
-          kind export kubeconfig --name "$KIND_CLUSTER"
-          kubectl config current-context
-          kubectl get nodes -o wide
 
       - name: Build da imagem ${{ env.IMAGEM }}
         run: |

@@ -28,6 +28,9 @@ param(
 )
 
 $ErrorActionPreference = "Continue"
+# Recarrega o PATH do registro: ferramentas instaladas pelo winget nesta sessao
+# (kind, terraform) so aparecem em janelas novas do PowerShell.
+$env:Path = [Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [Environment]::GetEnvironmentVariable("Path", "User") + ";" + $env:Path
 $ProgressPreference = "SilentlyContinue"
 [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12
 $raiz = Split-Path -Parent (Split-Path -Parent $PSScriptRoot)
