@@ -32,20 +32,8 @@ variable "postgres_imagem" {
   default     = "postgres:16.15-alpine"
 }
 
-variable "keycloak_imagem" {
-  description = "Imagem oficial do Keycloak, fixada no patch (26.7.1, ultima estavel em 2026-08; a tag 26.4.16 nao foi publicada no quay.io)."
-  type        = string
-  default     = "quay.io/keycloak/keycloak:26.7.1"
-}
-
 variable "metrics_server_chart_versao" {
   description = "Versao do chart metrics-server (https://kubernetes-sigs.github.io/metrics-server/)."
   type        = string
   default     = "3.14.0"
-}
-
-variable "keycloak_admin_usuario" {
-  description = "Usuario do admin bootstrap do Keycloak (realm master). A senha e gerada."
-  type        = string
-  default     = "admin"
 }

@@ -1,6 +1,6 @@
-# Duas instancias PostgreSQL 16 independentes (ADR-004):
-#   revenda-db  (ns revenda)    -> schemas catalogo e vendas, sem dados pessoais
-#   keycloak-db (ns identidade) -> usuarios, credenciais e atributos pessoais do Keycloak
+# PostgreSQL 16 da API (ADR-004): revenda-db (ns revenda) com os schemas catalogo e
+# vendas, sem dados pessoais. O banco do Keycloak (keycloak-db, ns identidade) e outra
+# instancia, de outro repositorio (fiap-soat-revenda-identidade).
 # StatefulSet + PVC (storage class "standard" do kind = local-path) + Service.
 
 locals {
@@ -14,16 +14,6 @@ locals {
       banco         = "revenda" # igual a DB_NAME do Secret revenda-db-credentials
       tipo_servico  = var.expor_banco_revenda ? "NodePort" : "ClusterIP"
       node_port     = var.expor_banco_revenda ? 30432 : null
-    }
-    keycloak = {
-      nome          = "keycloak-db"
-      namespace     = kubernetes_namespace_v1.identidade.metadata[0].name
-      secret        = kubernetes_secret_v1.keycloak_db_credentials.metadata[0].name
-      chave_usuario = "KC_DB_USERNAME"
-      chave_senha   = "KC_DB_PASSWORD"
-      banco         = "keycloak" # igual ao final de KC_DB_URL no Deployment do Keycloak
-      tipo_servico  = "ClusterIP"
-      node_port     = null
     }
   }
 

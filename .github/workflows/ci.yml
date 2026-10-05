@@ -260,32 +260,6 @@ jobs:
           "${RUNNER_TEMP}/hadolint" infra/runner/Dockerfile
           echo "Runner OK"
 
-      - name: Realm do Keycloak (JSON valido e contrato minimo)
-        run: |
-          set -euo pipefail
-          arquivo=keycloak/realm-revenda.json
-          jq empty "$arquivo"
-          verificar() {
-            if ! jq -e "$1" "$arquivo" >/dev/null; then
-              echo "::error file=${arquivo}::Contrato do realm violado: $2"
-              exit 1
-            fi
-          }
-          verificar '.realm == "revenda"' 'realm deve se chamar revenda'
-          verificar '[.roles.realm[]?.name] | index("cliente") != null' 'papel de realm cliente ausente'
-          verificar '[.roles.realm[]?.name] | index("gestor") != null' 'papel de realm gestor ausente'
-          for c in revenda-api revenda-swagger revenda-e2e; do
-            verificar "[.clients[]?.clientId] | index(\"$c\") != null" "client $c ausente"
-          done
-          verificar '.clients[] | select(.clientId == "revenda-e2e") | .directAccessGrantsEnabled == true' 'revenda-e2e precisa de directAccessGrantsEnabled'
-          # LGPD (minimizacao): access token so com sub (escopo basic) e papeis (roles);
-          # profile e email ficam opcionais, fora do token por padrao.
-          for c in revenda-swagger revenda-e2e; do
-            verificar ".clients[] | select(.clientId == \"$c\") | (.defaultClientScopes | index(\"basic\") != null and index(\"roles\") != null)" "client $c precisa dos escopos padrao basic e roles"
-            verificar ".clients[] | select(.clientId == \"$c\") | ([.defaultClientScopes[] | select(. == \"profile\" or . == \"email\")] | length == 0)" "client $c nao pode ter profile/email como escopo padrao (minimizacao LGPD)"
-          done
-          echo "Realm OK"
-
   # Valida o titulo do PR (vira a mensagem do squash na main) no formato
   # Conventional Commits (docs/08, secao 4.3). Nao e required check.
   titulo-pr:

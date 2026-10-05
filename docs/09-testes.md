@@ -20,7 +20,7 @@ flowchart TB
 |---|---|---|---|---|---|
 | Unidade | `unit` | ~70% dos testes | Agregados `Veiculo` e `Venda` (transições, invariantes, expiração, idempotência), value objects (código de pagamento, preço, ano), casos de uso com repositórios em memória, `CatalogoPort` falso e relógio fixo; validação de JWT com chave RSA gerada no teste; regras de arquitetura (imports) | SQL, HTTP, Keycloak | Nada externo |
 | Integração | `integration` | ~25% | Repositórios SQLAlchemy contra PostgreSQL 16 (ordenação, paginação, índice único parcial, UPDATE condicional); concorrência real (N compras simultâneas do mesmo veículo); API completa com `TestClient` (status HTTP, `problem+json`, autorização por papel, webhook); migrações Alembic aplicadas do zero | Keycloak real, cluster | PostgreSQL (docker compose localmente; *service container* no CI) |
-| Ponta a ponta | `e2e` | ~5% | Fluxo do roteiro do vídeo contra o ambiente implantado no kind: tokens reais do Keycloak, compra, webhook, efetivação, listagens | Casos de borda já cobertos abaixo | Cluster kind com API (8080) e Keycloak (8180) |
+| Ponta a ponta | `e2e` | ~5% | Fluxo do roteiro do vídeo contra o ambiente implantado no kind: tokens reais do Keycloak, compra, webhook, efetivação, listagens | Casos de borda já cobertos abaixo | Cluster kind com API (8080) e Keycloak (8180, implantado pelo repositório de identidade) |
 | Carga | — (script k6, fora do pytest) | — | Meta de desempenho das listagens (RNF-10) e reação do HPA (RNF-09) | Correção funcional | Cluster kind ou docker compose, k6 |
 
 ## 9.2 Ferramentas
@@ -59,14 +59,14 @@ uv run pytest -m integration
 uv run pytest -m "unit or integration" --cov=revenda --cov-branch \
   --cov-report=term-missing --cov-report=xml --cov-fail-under=80
 
-# 5. Ponta a ponta contra o ambiente implantado no kind
+# 5. Ponta a ponta contra o ambiente implantado no kind (identidade e API no ar)
 export E2E_API_URL="http://localhost:8080"
 export E2E_KEYCLOAK_URL="http://localhost:8180"
 segredo() { kubectl -n "$1" get secret "$2" -o jsonpath="{.data.$3}" | base64 -d; }
 export E2E_WEBHOOK_SECRET="$(segredo revenda revenda-webhook-secret WEBHOOK_SECRET)"
 export E2E_GESTOR_PASSWORD="$(segredo identidade keycloak-gestor GESTOR_PASSWORD)"
-export E2E_KC_ADMIN_USER="$(segredo identidade keycloak-admin KC_BOOTSTRAP_ADMIN_USERNAME)"
-export E2E_KC_ADMIN_PASSWORD="$(segredo identidade keycloak-admin KC_BOOTSTRAP_ADMIN_PASSWORD)"
+export E2E_KC_CLIENT_SECRET="$(segredo identidade keycloak-e2e E2E_ADMIN_CLIENT_SECRET)"
+# E2E_KC_CLIENT_ID é opcional (padrão revenda-e2e-admin; o mesmo valor de keycloak-e2e/E2E_ADMIN_CLIENT_ID)
 pip install -r tests/e2e/requirements.txt   # e2e não depende do pacote revenda
 pytest tests/e2e -m e2e -o addopts="" -v
 ```
@@ -74,9 +74,10 @@ pytest tests/e2e -m e2e -o addopts="" -v
 Observações:
 
 - Os testes `e2e` ficam fora da execução padrão (`addopts = -m "not e2e"` no `pyproject.toml`); só rodam quando selecionados explicitamente.
-- O e2e obtém tokens pelo client `revenda-e2e` (password grant), habilitado somente no realm do ambiente local; cria seus próprios clientes de teste com nomes aleatórios para poder ser executado repetidas vezes.
+- O e2e obtém tokens pelo client `revenda-e2e` (password grant), habilitado somente no realm do ambiente local; cria seus próprios clientes de teste com nomes aleatórios para poder ser executado repetidas vezes, pela Admin API do realm `revenda`, com o client técnico `revenda-e2e-admin` (client credentials, só `manage-users`, `view-users` e `query-users`). O admin do realm `master` não é usado. Os dois clients e os Secrets `keycloak-gestor` e `keycloak-e2e` são parte do contrato publicado pelo [repositório de identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade).
+- Variáveis do e2e: `E2E_API_URL` e `E2E_KEYCLOAK_URL` (opcionais), `E2E_GESTOR_PASSWORD`, `E2E_WEBHOOK_SECRET` e `E2E_KC_CLIENT_SECRET` (obrigatórias), `E2E_KC_CLIENT_ID` (padrão `revenda-e2e-admin`), `E2E_GESTOR_USERNAME` (padrão `gestor.loja`), `E2E_RESERVA_TTL_MINUTOS` (padrão 30) e `E2E_EXIGIR` (`1` transforma variável ausente em erro).
 - O docker compose cria o banco `revenda_test` na primeira subida do serviço `postgres`, com o usuário `revenda` e a senha `DB_PASSWORD` do `.env`. Sem `TEST_DATABASE_URL`, os testes de integração são pulados com aviso.
-- No CI, a etapa de integração usa o *service container* `postgres:16-alpine` (credenciais fixas de teste, sem segredo real); no CD, o e2e roda no runner self-hosted após o rollout, contra `http://revenda-control-plane:30080` e `:30180`.
+- No CI, a etapa de integração usa o *service container* `postgres:16-alpine` (credenciais fixas de teste, sem segredo real); no CD, o e2e roda no runner self-hosted após o rollout, contra `http://revenda-control-plane:30080` e `:30180`. O contrato do realm em si (papéis, clients, escopos, perfil de usuário) é testado no CI do repositório de identidade, job `realm`.
 
 ## 9.4 Critérios da suíte
 

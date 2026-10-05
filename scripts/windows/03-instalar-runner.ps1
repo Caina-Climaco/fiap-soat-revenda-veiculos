@@ -138,8 +138,8 @@ if (-not (Existe "network" "kind")) {
 }
 $stateDir = Join-Path $env:USERPROFILE ".revenda"
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
-if (-not (Test-Path (Join-Path $stateDir "terraform.tfstate"))) {
-    Write-Host "AVISO: $stateDir\terraform.tfstate nao existe; o primeiro CD vai criar um state novo."
+if (-not (Test-Path (Join-Path $stateDir "revenda-api.tfstate"))) {
+    Write-Host "AVISO: $stateDir\revenda-api.tfstate nao existe; o primeiro CD vai criar um state novo."
 }
 
 # Runner Windows da tentativa anterior (bloqueado pelo Smart App Control)

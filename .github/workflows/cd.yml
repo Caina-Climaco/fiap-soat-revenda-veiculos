@@ -4,8 +4,12 @@
 # main (PR mergeado) ou disparo manual. Nenhum workflow self-hosted reage a pull_request.
 # O container esta na rede docker "kind": fala com o cluster pelo nome do no
 # (revenda-control-plane), com o Docker do host pelo socket montado e grava o state do
-# Terraform em /revenda-state (bind mount de %USERPROFILE%\.revenda, o mesmo arquivo
-# usado pelo scripts/windows/04-subir-ambiente.ps1).
+# Terraform em /revenda-state/revenda-api.tfstate (bind mount de %USERPROFILE%\.revenda,
+# o mesmo arquivo usado pelo scripts/windows/04-subir-ambiente.ps1).
+# O servico de identidade (Keycloak) e implantado por OUTRO repositorio
+# (fiap-soat-revenda-identidade, ADR-014). Este CD so consome o contrato dele: o realm
+# publicado, a senha do usuario seed e o client tecnico do e2e (Secrets keycloak-gestor e
+# keycloak-e2e do namespace identidade).
 name: CD
 
 on:
@@ -46,6 +50,7 @@ jobs:
       E2E_KEYCLOAK_URL: http://revenda-control-plane:30180
       STATE_DIR: /revenda-state
       TF_DATA_DIR: /home/runner/persist/terraform-data
+      STATE_FILE: revenda-api.tfstate
       TF_IN_AUTOMATION: "1"
       TF_INPUT: "0"
     steps:
@@ -74,6 +79,13 @@ jobs:
             exit 1
           fi
           echo "OK: ${SHA} pertence ao historico da main."
+          # Commits anteriores a separacao da identidade (ADR-014) declaram o Keycloak no
+          # Terraform deste repositorio e usam outro state: implanta-los conflitaria com o
+          # repositorio fiap-soat-revenda-identidade.
+          if [ -e infra/terraform/keycloak.tf ] || [ -d keycloak ]; then
+            echo "::error::O commit ${SHA} e anterior a separacao da identidade (ADR-014) e nao pode ser implantado por este CD."
+            exit 1
+          fi
 
       - name: Contexto (SHA, diretorios, kubeconfig)
         env:
@@ -109,25 +121,61 @@ jobs:
       - name: Cluster kind (cria se nao existir)
         run: |
           set -euo pipefail
-          clusters="$(kind get clusters 2>/dev/null || true)"
-          if printf '%s\n' "$clusters" | grep -qx "$KIND_CLUSTER"; then
+          existe() {
+            kind get clusters 2>/dev/null | grep -qx "$KIND_CLUSTER" \
+              && [ "$(docker inspect -f '{{.State.Running}}' "${KIND_CLUSTER}-control-plane" 2>/dev/null)" = "true" ]
+          }
+          # Exclusao mutua entre os CDs dos dois repositorios (o cluster e compartilhado):
+          # `docker network create` e atomico e falha se a rede ja existir. Sem isso, um
+          # `kind create` que perde a corrida apaga, ao falhar, o no que o outro criou.
+          TRAVA=revenda-kind-criando
+          if existe; then
             echo "Cluster kind '$KIND_CLUSTER' ja existe."
+          elif docker network create "$TRAVA" >/dev/null 2>&1; then
+            trap 'docker network rm "$TRAVA" >/dev/null 2>&1 || true' EXIT
+            if existe; then
+              echo "Cluster kind '$KIND_CLUSTER' ja existe."
+            else
+              kind create cluster --config infra/kind/cluster.yaml --wait 120s
+            fi
           else
-            kind create cluster --config infra/kind/cluster.yaml --wait 120s
+            echo "O CD do outro repositorio esta criando o cluster; aguardando (ate 6 min)..."
+            for _ in $(seq 1 72); do
+              if existe && ! docker network inspect "$TRAVA" >/dev/null 2>&1; then break; fi
+              sleep 5
+            done
+            existe || { echo "::error::Cluster '$KIND_CLUSTER' nao ficou pronto. Se nenhum CD estiver rodando, remova a trava: docker network rm $TRAVA"; exit 1; }
           fi
-          # --internal: API server em https://revenda-control-plane:6443 (rede "kind"),
-          # alcancavel de dentro do container do runner
           kind export kubeconfig --internal --name "$KIND_CLUSTER"
           kubectl config current-context
           kubectl get nodes -o wide
 
-      - name: Terraform (namespaces, segredos, bancos, Keycloak, metrics-server)
+      # Pre-requisito: o servico de identidade ja publicado (outro repositorio, outro CD).
+      # Falha cedo, antes de mexer em qualquer recurso da API.
+      - name: Servico de identidade publicado (contrato)
+        run: |
+          set -euo pipefail
+          url="${E2E_KEYCLOAK_URL}/realms/revenda/.well-known/openid-configuration"
+          for _ in $(seq 1 24); do
+            if curl -fsS -o /dev/null --max-time 5 "$url"; then echo "OK: $url"; exit 0; fi
+            sleep 5
+          done
+          echo "::error::Realm revenda indisponivel em $url. Implante antes o servico de identidade (repositorio fiap-soat-revenda-identidade)."
+          exit 1
+
+      - name: Terraform (namespace revenda, segredos, revenda-db, metrics-server)
         working-directory: infra/terraform
         run: |
           set -euo pipefail
-          terraform init -input=false -backend-config="path=${STATE_DIR}/terraform.tfstate"
-          # Mesmo state do Windows (/revenda-state); TF_DATA_DIR proprio (providers linux)
-          # Os providers kubernetes/helm usam o contexto kind-revenda do KUBECONFIG interno
+          # Mesmo state do Windows (/revenda-state); TF_DATA_DIR proprio (providers linux).
+          # -reconfigure: o caminho do state e fixo e vem sempre por -backend-config.
+          # State unico de antes da separacao dos repositorios: os recursos dele ja existem
+          # no cluster e colidiriam com este state novo. Migre antes (README, Migracao).
+          if [ -e "${STATE_DIR}/terraform.tfstate" ]; then
+            echo "::error::Existe ${STATE_DIR}/terraform.tfstate (ambiente anterior a separacao dos repositorios). Siga a secao 'Migracao' do README antes de implantar."
+            exit 1
+          fi
+          terraform init -input=false -reconfigure -backend-config="path=${STATE_DIR}/${STATE_FILE}"
           terraform apply -input=false -auto-approve
 
       - name: Build da imagem ${{ env.IMAGEM }}
@@ -195,7 +243,7 @@ jobs:
           [ "$atual" = "$IMAGEM" ] || { echo "::error::Deployment com imagem inesperada: '$atual' (esperada: $IMAGEM)"; exit 1; }
           kubectl -n "$NS_APP" get deployment,pods,svc,hpa -o wide
 
-      - name: Aguarda API pronta e discovery do Keycloak
+      - name: Aguarda API pronta
         run: |
           set -euo pipefail
           esperar() {
@@ -211,7 +259,6 @@ jobs:
             echo "OK: $url"
           }
           esperar "${E2E_API_URL}/health/ready" 180
-          esperar "${E2E_KEYCLOAK_URL}/realms/revenda/.well-known/openid-configuration" 300
 
       - name: Python 3.12 para o e2e
         # python3 da imagem do runner (Ubuntu 24.04); sem actions/setup-python
@@ -244,10 +291,11 @@ jobs:
           echo "::add-mask::${E2E_GESTOR_PASSWORD}"
           E2E_WEBHOOK_SECRET="$(segredo "$NS_APP" revenda-webhook-secret WEBHOOK_SECRET)"
           echo "::add-mask::${E2E_WEBHOOK_SECRET}"
-          E2E_KC_ADMIN_USER="$(segredo "$NS_ID" keycloak-admin KC_BOOTSTRAP_ADMIN_USERNAME)"
-          E2E_KC_ADMIN_PASSWORD="$(segredo "$NS_ID" keycloak-admin KC_BOOTSTRAP_ADMIN_PASSWORD)"
-          echo "::add-mask::${E2E_KC_ADMIN_PASSWORD}"
-          export E2E_GESTOR_PASSWORD E2E_WEBHOOK_SECRET E2E_KC_ADMIN_USER E2E_KC_ADMIN_PASSWORD
+          # Contrato com o servico de identidade: client tecnico do e2e (nunca o admin master)
+          E2E_KC_CLIENT_ID="$(segredo "$NS_ID" keycloak-e2e E2E_ADMIN_CLIENT_ID)"
+          E2E_KC_CLIENT_SECRET="$(segredo "$NS_ID" keycloak-e2e E2E_ADMIN_CLIENT_SECRET)"
+          echo "::add-mask::${E2E_KC_CLIENT_SECRET}"
+          export E2E_GESTOR_PASSWORD E2E_WEBHOOK_SECRET E2E_KC_CLIENT_ID E2E_KC_CLIENT_SECRET
           # No CD a ausencia de variaveis e erro (nunca skip silencioso).
           export E2E_EXIGIR=1
           # tests/e2e/pytest.ini isola a configuracao do pyproject (addopts -m "not e2e").
@@ -260,7 +308,6 @@ jobs:
           kubectl get pods -A -o wide || true
           kubectl -n "$NS_APP" get events --sort-by=.lastTimestamp | tail -n 40 || true
           kubectl -n "$NS_APP" logs deployment/revenda-api --all-containers --tail=200 || true
-          kubectl -n "$NS_ID" logs deployment/keycloak --tail=80 || true
           echo "Rollback: Actions > CD > Run workflow com ref=<sha-anterior>, ou 'kubectl -n revenda rollout undo deployment/revenda-api' (docs/08, secao 6)."
 
       - name: Resumo da implantacao

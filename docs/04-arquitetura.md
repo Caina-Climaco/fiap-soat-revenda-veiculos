@@ -11,9 +11,9 @@ A solução é composta por **dois sistemas implantáveis de forma independente*
 | Sistema | Estilo | Responsabilidade | Persistência |
 |---|---|---|---|
 | `revenda-api` | **Monólito modular** com Clean Architecture por módulo | Contextos **Catálogo** (suporte) e **Vendas** (principal) | PostgreSQL `revenda`, schemas `catalogo` e `vendas` |
-| Keycloak (realm `revenda`) | Produto pronto (identity provider OIDC) | Contexto **Identidade e Acesso** (genérico): cadastro, login, papéis, dados pessoais | PostgreSQL `keycloak`, **outra instância** |
+| Keycloak (realm `revenda`) | Produto pronto (identity provider OIDC), em **outro repositório** ([fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade)) | Contexto **Identidade e Acesso** (genérico): cadastro, login, papéis, dados pessoais | PostgreSQL `keycloak`, **outra instância** |
 
-A fronteira física relevante para o enunciado é **identidade × transacional**: os dados pessoais dos clientes ficam apenas no Keycloak e no seu banco; a API só conhece o identificador opaco `sub` do token (ver [07-seguranca-lgpd.md](07-seguranca-lgpd.md)). Entre Catálogo e Vendas a fronteira é **lógica** (módulos, schemas e uma porta explícita), o que permite uma transação ACID única na compra sem saga nem mensageria ([ADR-002](adrs/ADR-002-monolito-modular.md)).
+A fronteira física relevante para o enunciado é **identidade × transacional**: os dados pessoais dos clientes ficam apenas no Keycloak e no seu banco, que são mantidos e implantados por outro repositório, com pipeline, Terraform e state próprios ([ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md)); a API só conhece o identificador opaco `sub` do token (ver [07-seguranca-lgpd.md](07-seguranca-lgpd.md)). Entre Catálogo e Vendas a fronteira é **lógica** (módulos, schemas e uma porta explícita), o que permite uma transação ACID única na compra sem saga nem mensageria ([ADR-002](adrs/ADR-002-monolito-modular.md)).
 
 O Gateway de Pagamento é um sistema externo **simulado**; ele notifica o resultado do pagamento por webhook, tratado por uma camada anticorrupção (ACL) no módulo Vendas ([ADR-007](adrs/ADR-007-pagamento-webhook.md)).
 
@@ -21,7 +21,7 @@ O Gateway de Pagamento é um sistema externo **simulado**; ele notifica o result
 
 | Prioridade | Atributo | Cenário de qualidade | Táticas adotadas |
 |---|---|---|---|
-| 1 | **Segurança e privacidade** | Um invasor com acesso somente leitura ao banco da API não obtém nome, e-mail, CPF ou telefone de nenhum cliente | Identidade apartada (instância de banco distinta); `comprador_id` = `sub` (pseudônimo); JWT RS256 validado; RBAC; segredos fora do Git |
+| 1 | **Segurança e privacidade** | Um invasor com acesso somente leitura ao banco da API não obtém nome, e-mail, CPF ou telefone de nenhum cliente | Identidade apartada (repositório, pipeline, namespace e instância de banco distintos); `comprador_id` = `sub` (pseudônimo); JWT RS256 validado; RBAC; segredos fora do Git |
 | 2 | **Consistência / integridade** | Dois clientes que compram o mesmo veículo no mesmo instante: exatamente um recebe 201, o outro 409 | UPDATE condicional, índice único parcial, transação única (Unit of Work) ([ADR-008](adrs/ADR-008-concorrencia-update-condicional.md)) |
 | 3 | **Implantabilidade** | Um PR mergeado na `main` chega ao cluster sem passo manual, com migração aplicada e teste e2e verde | CLI kind + Terraform + kustomize + CD self-hosted + Job de migração ([08-ci-cd-infra.md](08-ci-cd-infra.md)) |
 | 4 | **Testabilidade** | Regras de domínio testáveis sem banco, sem rede e com relógio controlado | Clean Architecture, portas e adaptadores, `Clock` injetável ([09-testes.md](09-testes.md)) |
@@ -91,8 +91,10 @@ C4Container
 | `revenda-api` | Imagem `revenda-api:<sha>`, Uvicorn na porta 8000 | Service NodePort 30080 → host 8080; `/metrics` na mesma porta, com anotações `prometheus.io/*` no pod |
 | Job de migração | Mesma imagem, comando `python -m revenda.migracao` (`alembic upgrade head`, mas sem efeito quando o banco está numa revisão mais nova que a imagem, caso de rollback) | Não exposto |
 | PostgreSQL `revenda` | `postgres:16.15-alpine`, PVC | Service `revenda-db:5432`, NodePort 30432 → host `127.0.0.1:15432` por padrão, para a demonstração (`expor_banco_revenda = false` o torna ClusterIP) |
-| Keycloak | `quay.io/keycloak/keycloak:26.7.1`, `start-dev --import-realm`, *limit* de memória 1536Mi | Service NodePort 30180 → host 8180 |
-| PostgreSQL `keycloak` | `postgres:16.15-alpine`, PVC | Service ClusterIP `keycloak-db:5432` (não exposto) |
+| Keycloak (repositório de identidade) | `quay.io/keycloak/keycloak:26.7.1`, *limit* de memória 1536Mi | Service NodePort 30180 → host 8180 |
+| PostgreSQL `keycloak` (repositório de identidade) | `postgres:16.15-alpine`, PVC | Service ClusterIP `keycloak-db:5432` (não exposto) |
+
+Os dois últimos containers são implantados pelo repositório de identidade; os detalhes deles estão no `README.md` daquele repositório. Este repositório só consome o contrato (issuer, JWKS, audiência, papéis).
 
 ## 4. C4 nível 3 — Componentes da `revenda-api`
 
@@ -166,18 +168,21 @@ flowchart TB
 
 ## 5. Visão de implantação
 
-O ambiente é um cluster **kind** de um nó (control-plane) criado pela CLI `kind` (a partir de `infra/kind/cluster.yaml`) no PC do autor, com todo o conteúdo do cluster gerenciado pelo Terraform. O mesmo PC hospeda o runner self-hosted do GitHub Actions, num container Linux no Docker Desktop ligado à rede docker `kind` ([ADR-006](adrs/ADR-006-ci-hospedado-cd-self-hosted.md)). Não há Ingress: os serviços são publicados por **NodePort** mapeados para portas do host via `extraPortMappings` do kind ([ADR-005](adrs/ADR-005-kind-terraform-nodeport.md)).
+O ambiente é um cluster **kind** de um nó (control-plane) criado pela CLI `kind` (a partir de `infra/kind/cluster.yaml`) no PC do autor. O cluster é a plataforma compartilhada pelos dois repositórios: cada um gerencia, com Terraform e state próprios, apenas o seu namespace (`revenda` aqui, `identidade` no repositório de identidade), e o CD de cada um cria o cluster se ele faltar ([ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md)). O mesmo PC hospeda os dois runners self-hosted do GitHub Actions (`revenda-runner` e `revenda-runner-identidade`), em containers Linux no Docker Desktop ligados à rede docker `kind` ([ADR-006](adrs/ADR-006-ci-hospedado-cd-self-hosted.md)). Não há Ingress: os serviços são publicados por **NodePort** mapeados para portas do host via `extraPortMappings` do kind ([ADR-005](adrs/ADR-005-kind-terraform-nodeport.md)).
 
 ```mermaid
 flowchart LR
   subgraph GH["GitHub (nuvem)"]
     repo["Repositório<br/>fiap-soat-revenda-veiculos"]
+    repoid["Repositório<br/>fiap-soat-revenda-identidade"]
     ci["CI: runner hospedado<br/>ubuntu-latest"]
   end
 
   subgraph PC["PC do autor (Windows 11, Docker Desktop)"]
     runner["Container revenda-runner<br/>runner self-hosted Linux<br/>label kind-local, rede kind"]
-    tfstate[("Terraform state local<br/>fora do repositório")]
+    runnerid["Container revenda-runner-identidade<br/>CD da identidade"]
+    tfstate[("revenda-api.tfstate<br/>fora do repositório")]
+    tfstateid[("identidade.tfstate")]
     browser["Navegador / curl"]
 
     subgraph KIND["Cluster kind revenda (container Docker do nó control-plane)"]
@@ -188,7 +193,7 @@ flowchart LR
         stsapi[("StatefulSet revenda-db<br/>postgres:16-alpine + PVC")]
         svcdb["Service revenda-db<br/>5432, NodePort 30432"]
       end
-      subgraph NSI["namespace identidade"]
+      subgraph NSI["namespace identidade (repositório de identidade)"]
         kcdep["Deployment keycloak<br/>1 pod, start-dev"]
         svckc["Service keycloak<br/>NodePort 30180"]
         stskc[("StatefulSet keycloak-db<br/>postgres:16-alpine + PVC")]
@@ -201,10 +206,15 @@ flowchart LR
   end
 
   repo -->|"pull_request / push"| ci
+  repoid -->|"pull_request / push"| ci
   repo -->|"push na main: job de CD"| runner
-  runner -->|"kind create cluster (se faltar) + terraform apply"| KIND
+  repoid -->|"push na main: job de CD"| runnerid
+  runner -->|"kind create cluster (se faltar) + terraform apply"| NSR
   runner --- tfstate
   runner -->|"kind load + kubectl apply"| NSR
+  runner -.->|"confere o realm antes do apply"| svckc
+  runnerid -->|"kind create cluster (se faltar) + terraform apply"| NSI
+  runnerid --- tfstateid
   browser -->|"localhost:8080"| svcapi
   browser -->|"localhost:8180"| svckc
   svcapi --> dep
@@ -218,8 +228,8 @@ flowchart LR
 | Elemento | Detalhe |
 |---|---|
 | Mapeamento de portas | host `8080` → nodePort `30080` (API); host `8180` → nodePort `30180` (Keycloak). host `15432` → nodePort `30432` (banco da API, só para demonstração; desligável com `expor_banco_revenda=false`). O banco do Keycloak **não** é exposto |
-| Secrets (Terraform) | `revenda-db-credentials`, `revenda-webhook-secret` (ns `revenda`); `keycloak-db-credentials`, `keycloak-admin`, `keycloak-gestor` (ns `identidade`) |
-| NetworkPolicy | `revenda-db` só aceita pods com rótulo `app` igual a `revenda-api` ou `revenda-migracao` (mais o tráfego do NodePort de demonstração); `keycloak-db` só aceita `app=keycloak` |
+| Secrets (Terraform) | Deste repositório: `revenda-db-credentials`, `revenda-webhook-secret` (ns `revenda`). Do repositório de identidade (ns `identidade`): `keycloak-db-credentials`, `keycloak-admin`, `keycloak-gestor`, `keycloak-e2e`; destes, o CD da API lê só os de contrato `keycloak-gestor` e `keycloak-e2e`, para o e2e |
+| NetworkPolicy | `revenda-db` só aceita pods com rótulo `app` igual a `revenda-api` ou `revenda-migracao` (mais o tráfego do NodePort de demonstração). A do `keycloak-db` (só `app=keycloak`) é do repositório de identidade |
 | Observabilidade | Logs JSON em stdout (`kubectl logs`); `GET /metrics` em cada pod, com anotações `prometheus.io/scrape`, `port` e `path` para um Prometheus que venha a ser instalado; metrics-server alimenta o HPA e o `kubectl top`. Não há Prometheus nem APM instalados no cluster nesta entrega ([12-observabilidade.md](12-observabilidade.md)) |
 | Emissor dos tokens | `KC_HOSTNAME=http://localhost:8180`, então `iss = http://localhost:8180/realms/revenda`. A API busca o JWKS pelo endereço interno do Service, mas valida o `iss` público (ver [07-seguranca-lgpd.md](07-seguranca-lgpd.md)) |
 
@@ -439,9 +449,8 @@ fiap-soat-revenda-veiculos/
 │   └── main.py              # app factory: monta routers, handlers, composição de dependências
 ├── migrations/              # Alembic (env.py, versions/)
 ├── tests/{unit,integration,e2e}
-├── infra/terraform/
-├── k8s/{base,migracao}/
-└── keycloak/realm-revenda.json
+├── infra/terraform/         # só o namespace revenda (o realm e o Keycloak estão no repositório de identidade)
+└── k8s/{base,migracao}/
 ```
 
 ### 7.2 Responsabilidades por camada

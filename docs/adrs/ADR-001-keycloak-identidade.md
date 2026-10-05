@@ -1,6 +1,7 @@
 # ADR-001: Keycloak como provedor de identidade apartado
 
 **Status:** Aceito
+**Atualizado por:** [ADR-014](ADR-014-identidade-em-repositorio-proprio.md)
 **Data:** 2026-10-03
 
 ## Contexto
@@ -18,7 +19,7 @@ O enunciado exige que o cadastro e a autorização dos compradores fiquem num se
 
 ## Decisão
 
-Adotar o **Keycloak 26.7.1** (imagem oficial `quay.io/keycloak/keycloak:26.7.1`, tag fixada) no namespace `identidade`, com **uma instância PostgreSQL exclusiva**. A configuração fica no realm `revenda`, versionado em `keycloak/realm-revenda.json` e importado na inicialização. Ela inclui:
+Adotar o **Keycloak 26.7.1** (imagem oficial `quay.io/keycloak/keycloak:26.7.1`, tag fixada) no namespace `identidade`, com **uma instância PostgreSQL exclusiva**. A configuração fica no realm `revenda`, versionado em `keycloak/realm-revenda.json` (hoje no repositório de identidade; ver a atualização abaixo) e importado na inicialização. Ela inclui:
 
 - papéis `cliente` (atribuído por padrão no autorregistro) e `gestor`;
 - perfil de usuário com nome, sobrenome, e-mail, CPF e telefone;
@@ -48,3 +49,12 @@ A API só valida tokens JWT RS256 pela JWKS do realm. Ela nunca recebe nem guard
   - modo `start` com TLS, hostname fixo e cluster com cache distribuído;
   - **desativar o client `revenda-e2e`** (password grant), que existe só para os testes automatizados locais;
   - definir `OIDC_AZP_PERMITIDOS` na API apenas com os clients de produção (o padrão aceita `revenda-swagger` e `revenda-e2e`).
+
+## Atualização (ADR-014, 2026-10-04)
+
+Atualizado por [ADR-014](ADR-014-identidade-em-repositorio-proprio.md). A decisão (Keycloak, realm `revenda`, papéis, clients, validação do JWT pela API) continua a mesma; mudou **onde** o serviço é mantido e implantado:
+
+- O Keycloak, o realm (`keycloak/realm-revenda.json`), o banco `keycloak-db`, os segredos e a infraestrutura do namespace `identidade` saíram deste repositório e estão no repositório [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade), com Terraform, state, CI, CD e runner próprios. A segregação passa a ser também de repositório e de pipeline, não só de processo, banco e namespace.
+- O usuário seed `gestor.loja` e a senha dele são mantidos pelo Job `keycloak-reconciliar` daquele repositório (antes, o Job `keycloak-gestor-senha` deste).
+- Os testes e2e da API deixaram de usar o admin do realm `master`: usam o client técnico `revenda-e2e-admin` (client credentials, só `manage-users`, `view-users` e `query-users` do realm `revenda`), que também existe **só no ambiente local** e deve ser desativado em produção junto com o `revenda-e2e`.
+- O contrato consumido pela API (issuer, JWKS, audiência `revenda-api`, papéis `cliente`/`gestor`, client `revenda-swagger`) não mudou; ele é documentado em `docs/contrato-identidade.md` do repositório de identidade.

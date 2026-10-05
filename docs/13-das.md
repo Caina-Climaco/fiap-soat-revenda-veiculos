@@ -15,7 +15,7 @@ Folha de aprovação do desenho da solução: resume o que será entregue, as de
 
 ## 13.2 Resumo da solução e escopo
 
-API REST (`revenda-api`, Python 3.12 e FastAPI) para uma revenda vender veículos pela internet: o gestor cadastra e edita veículos; qualquer pessoa lista os veículos à venda e os vendidos por preço; o cliente cadastrado compra, o que reserva o veículo por 30 minutos; um gateway de pagamento (simulado) confirma ou recusa a compra por webhook. Cadastro, login e dados pessoais ficam no **Keycloak**, com banco PostgreSQL próprio, em outro namespace; a API guarda só o `sub` do token. Tudo roda num cluster kind local, com plataforma por Terraform e implantação por CI/CD a cada merge na `main`.
+API REST (`revenda-api`, Python 3.12 e FastAPI) para uma revenda vender veículos pela internet: o gestor cadastra e edita veículos; qualquer pessoa lista os veículos à venda e os vendidos por preço; o cliente cadastrado compra, o que reserva o veículo por 30 minutos; um gateway de pagamento (simulado) confirma ou recusa a compra por webhook. Cadastro, login e dados pessoais ficam no **Keycloak**, entregue em outro repositório ([fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade)), com pipeline, state do Terraform, namespace e banco PostgreSQL próprios; a API guarda só o `sub` do token. Tudo roda num cluster kind local compartilhado, com plataforma por Terraform e implantação por CI/CD a cada merge na `main` de cada repositório.
 
 Fora do escopo: front-end, pagamento real, nota fiscal, nuvem pública ([01-visao-geral.md](01-visao-geral.md), seção 1.3).
 
@@ -45,12 +45,13 @@ Fora do escopo: front-end, pagamento real, nota fiscal, nuvem pública ([01-visa
 | [ADR-011](adrs/ADR-011-segredos-terraform.md) | Segredos gerados pelo Terraform, nada sensível versionado |
 | [ADR-012](adrs/ADR-012-observabilidade-prometheus.md) | Métricas Prometheus nativas; APM como evolução |
 | [ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md) | Sem API Gateway e sem Serverless nesta entrega |
+| [ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md) | Serviço de identidade em repositório próprio, com pipeline, Terraform e state separados |
 
 ## 13.5 Atributos de qualidade
 
 | Atributo | Como é atendido | Evidência |
 |---|---|---|
-| Segurança e privacidade | Identidade em banco e namespace separados; token só com `sub` e papéis; JWT RS256 validado; RBAC e controle por dono; segredos gerados; containers não root e somente leitura | [07](07-seguranca-lgpd.md); `test_migracoes_e_schema.py::test_schema_sem_dados_pessoais` |
+| Segurança e privacidade | Identidade em repositório, pipeline, state, namespace e banco separados; token só com `sub` e papéis; e2e sem o admin do realm `master`; JWT RS256 validado; RBAC e controle por dono; segredos gerados; containers não root e somente leitura | [07](07-seguranca-lgpd.md); `test_migracoes_e_schema.py::test_schema_sem_dados_pessoais` |
 | Integridade sob concorrência | UPDATE condicional, índice único parcial, transação única | `tests/integration/test_concorrencia.py` |
 | Implantabilidade | PR obrigatório, 4 checks, CD automático com migração tolerante a rollback e e2e | [08](08-ci-cd-infra.md) |
 | Testabilidade | Domínio sem framework, relógio injetável, cobertura mínima de 80% | [09](09-testes.md) |
@@ -64,6 +65,7 @@ Fora do escopo: front-end, pagamento real, nota fiscal, nuvem pública ([01-visa
 |---|---|---|
 | Keycloak consome muita memória no PC | *Limit* de 1536Mi, cluster de um nó | R-02 |
 | Runner self-hosted em repositório público | CD só na `main` (dispatch validado), fork PRs com aprovação, CI de PR só no runner hospedado | R-09, [ADR-006](adrs/ADR-006-ci-hospedado-cd-self-hosted.md) |
+| API implantada sem a identidade no ar (dois repositórios, ordem de implantação) | CD e script 04 da API conferem o realm `revenda` antes do `terraform apply` e falham cedo; contrato documentado no repositório de identidade | R-14, [ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md) |
 | PC desligado impede o CD | Runner em container com reinício automático; `workflow_dispatch` | R-01 |
 | Sem *rate limiting* na borda | Limites de paginação, validações estritas, HPA | R-12, [ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md) |
 | Degradação sem alerta ativo | `/metrics`, SLOs e regras de alerta prontas para um coletor | R-13, [ADR-012](adrs/ADR-012-observabilidade-prometheus.md) |
@@ -85,7 +87,7 @@ Lista completa em [10-plano-execucao.md, seção 10.5](10-plano-execucao.md#105-
 
 - *Rate limiting* e gateway na borda (Kong DB-less), limite de reservas ativas por comprador ([ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md)).
 - Prometheus, Grafana e alertas ativos; APM com traços ([12-observabilidade.md](12-observabilidade.md)).
-- Produção: TLS, Keycloak em modo `start`, desativar o client `revenda-e2e`, definir `OIDC_AZP_PERMITIDOS` ([ADR-001](adrs/ADR-001-keycloak-identidade.md)).
+- Produção: TLS, Keycloak em modo `start`, desativar os clients `revenda-e2e` e `revenda-e2e-admin`, definir `OIDC_AZP_PERMITIDOS` ([ADR-001](adrs/ADR-001-keycloak-identidade.md)).
 - Webhook com assinatura HMAC do corpo e proteção contra replay ([07-seguranca-lgpd.md](07-seguranca-lgpd.md), seção 3.5).
 - Backend remoto do Terraform e cofre de segredos ([ADR-011](adrs/ADR-011-segredos-terraform.md)); papéis de banco separados para migração e aplicação.
 - Unicidade do CPF no cadastro (limitação do Keycloak).

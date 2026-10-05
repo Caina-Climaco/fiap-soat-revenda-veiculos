@@ -1,6 +1,7 @@
 # ADR-004: PostgreSQL com schemas por módulo e instância separada para identidade
 
 **Status:** Aceito
+**Atualizado por:** [ADR-014](ADR-014-identidade-em-repositorio-proprio.md)
 **Data:** 2026-10-03
 
 ## Contexto
@@ -37,3 +38,7 @@ Os dados pessoais dos compradores precisam ficar apartados dos dados transaciona
 ## Mitigações
 - A criação da venda sempre passa pela `CatalogoPort`, que valida a existência do veículo e o reserva na mesma transação. Testes de integração cobrem esse caminho.
 - Recursos dos StatefulSets dimensionados para o ambiente local.
+
+## Atualização (ADR-014, 2026-10-04)
+
+Atualizado por [ADR-014](ADR-014-identidade-em-repositorio-proprio.md). As duas instâncias continuam separadas, como decidido aqui, mas cada uma pertence agora a um repositório: o `revenda-db` (namespace `revenda`) é provisionado pelo Terraform deste repositório, com state `revenda-api.tfstate`; o `keycloak-db` (namespace `identidade`) é provisionado pelo repositório [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade), com state e credenciais próprios. Este repositório não declara nem conhece mais as credenciais do banco do Keycloak, o que reforça a separação dos dados pessoais.

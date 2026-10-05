@@ -1,6 +1,7 @@
 # ADR-005: Kubernetes local (kind via CLI) com plataforma provisionada por Terraform, NodePort sem Ingress
 
 **Status:** Aceito
+**Atualizado por:** [ADR-014](ADR-014-identidade-em-repositorio-proprio.md)
 **Data:** 2026-10-03
 
 ## Contexto
@@ -51,3 +52,13 @@ A aplicação é implantada pelos manifestos em `k8s/` (kustomize) no pipeline d
 ## Mitigações
 - O state fica num diretório fixo fora do repositório (`.gitignore`). O procedimento de recriação está documentado em [08-ci-cd-infra.md](../08-ci-cd-infra.md).
 - Para produção, o caminho documentado é Gateway API com TLS num cluster gerenciado.
+
+## Atualização (ADR-014, 2026-10-04)
+
+Atualizado por [ADR-014](ADR-014-identidade-em-repositorio-proprio.md). O cluster kind `revenda` e a decisão de criá-lo pela CLI continuam iguais, mas o cluster virou a **plataforma local compartilhada** por dois repositórios:
+
+- O `infra/kind/cluster.yaml` é idêntico neste repositório e no [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade); o CD de cada um (e o script 04 de cada um) cria o cluster se ele faltar.
+- O Terraform **deste** repositório gerencia só o namespace `revenda`: Secrets `revenda-db-credentials` e `revenda-webhook-secret`, `revenda-db`, a NetworkPolicy dele e o metrics-server. State: `%USERPROFILE%\.revenda\revenda-api.tfstate` (antes, `terraform.tfstate`, com tudo junto).
+- O namespace `identidade` (Keycloak, `keycloak-db`, segredos, NetworkPolicy do `keycloak-db`, Job `keycloak-reconciliar`) é gerenciado pelo Terraform do repositório de identidade, com o state `%USERPROFILE%\.revenda\identidade.tfstate`.
+- A porta 8180 → NodePort 30180 continua no `cluster.yaml`, mas o Service que a usa é implantado pelo repositório de identidade.
+- O script `05-destruir-ambiente.ps1` deste repositório faz `terraform destroy` só da API; o cluster só é apagado com `-ApagarCluster` (o que derruba também a identidade). O `-Recriar` do script 04 foi removido: para recriar do zero, use o 05 com `-ApagarCluster` e suba de novo na ordem identidade → API.

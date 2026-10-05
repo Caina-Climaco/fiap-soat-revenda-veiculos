@@ -1,24 +1,25 @@
-# Sobe a plataforma local: cria o cluster kind "revenda" com a CLI kind, se faltar
-# (infra/kind/cluster.yaml), e aplica o Terraform com o que fica dentro do cluster:
-# namespaces, segredos, bancos, Keycloak e metrics-server (docs/08-ci-cd-infra.md, secao 1).
-# A aplicacao (revenda-api) e implantada pelo CD (.github/workflows/cd.yml).
+# Sobe a infraestrutura da API no cluster kind local: cria o cluster "revenda" com a CLI
+# kind, se faltar (infra/kind/cluster.yaml, plataforma compartilhada com o servico de
+# identidade), e aplica o Terraform DESTE repositorio: namespace revenda, segredos,
+# revenda-db e metrics-server (docs/08-ci-cd-infra.md, secao 1). A aplicacao (revenda-api)
+# e implantada pelo CD (.github/workflows/cd.yml).
+# O servico de identidade (Keycloak) e de OUTRO repositorio (fiap-soat-revenda-identidade,
+# ADR-014): suba-o antes, pelo 04-subir-ambiente.ps1 de la (ou pelo CD de la).
 # O cluster NAO e criado pelo Terraform: o provider tehcyx/kind nao tem assinatura de
 # codigo e e bloqueado pelo Smart App Control do Windows 11 (ADR-005).
 #
 # Uso:
-#   powershell -ExecutionPolicy Bypass -File .\scripts\windows\04-subir-ambiente.ps1 [-SemBancoExposto] [-Recriar]
+#   powershell -ExecutionPolicy Bypass -File .\scripts\windows\04-subir-ambiente.ps1 [-SemBancoExposto]
 #     -SemBancoExposto  nao publica o revenda-db em localhost:15432
-#     -Recriar          apaga o cluster e o state antes (ambiente do zero; dados e senhas novos)
 #
-# State: %USERPROFILE%\.revenda\terraform.tfstate (TF_DATA_DIR em
+# State: %USERPROFILE%\.revenda\revenda-api.tfstate (TF_DATA_DIR em
 # %USERPROFILE%\.revenda\terraform-data). O CD usa o MESMO arquivo de state: o runner e um
 # container Linux que monta %USERPROFILE%\.revenda em /revenda-state; so o TF_DATA_DIR
-# dele e outro (providers Linux). Script e CD compartilham o mesmo ambiente.
+# dele e outro (providers Linux). O state da identidade e outro arquivo (identidade.tfstate).
 # Nunca dentro do repositorio (ADR-011).
 # Log: .setup\relatorio-ambiente-subir.txt. Arquivo somente ASCII (Windows PowerShell 5.1).
 param(
-    [switch]$SemBancoExposto,
-    [switch]$Recriar
+    [switch]$SemBancoExposto
 )
 
 $ErrorActionPreference = "Continue"
@@ -70,12 +71,12 @@ $null = Invocar "terraform" @("version")
 
 # ------------------------------------------------------------------ caminhos (state compartilhado com o cd.yml)
 # O cd.yml roda no container Linux do runner (infra/runner) e le/grava o mesmo
-# terraform.tfstate em /revenda-state, bind mount de %USERPROFILE%\.revenda; o
+# revenda-api.tfstate em /revenda-state, bind mount de %USERPROFILE%\.revenda; o
 # TF_DATA_DIR dele e proprio (/home/runner/persist/terraform-data). Aqui o caminho usa
 # barras normais e fica sempre igual, para o terraform init nao pedir migracao de state.
 $perfil = $env:USERPROFILE -replace '\\', '/'
 $stateDir = "$perfil/.revenda"
-$statePath = "$stateDir/terraform.tfstate"
+$statePath = "$stateDir/revenda-api.tfstate"
 New-Item -ItemType Directory -Force -Path $stateDir | Out-Null
 $env:TF_DATA_DIR = "$stateDir/terraform-data"
 $env:TF_IN_AUTOMATION = "1"
@@ -84,18 +85,15 @@ $env:KUBECONFIG = "$perfil/.kube/config"
 $env:TF_VAR_kubeconfig_path = "$perfil/.kube/config"
 $env:TF_VAR_expor_banco_revenda = if ($SemBancoExposto) { "false" } else { "true" }
 Write-Host "State: $statePath | TF_DATA_DIR: $env:TF_DATA_DIR | KUBECONFIG: $env:KUBECONFIG"
+if (Test-Path "$stateDir/terraform.tfstate") {
+    Write-Host "AVISO: existe $stateDir/terraform.tfstate (state antigo, de quando a identidade e a API"
+    Write-Host "       estavam no mesmo repositorio). Veja 'Migracao para dois repositorios' no README."
+}
 
 # ------------------------------------------------------------------ cluster (CLI kind)
 $configKind = Join-Path $raiz "infra\kind\cluster.yaml"
 if (-not (Test-Path $configKind)) { Falhar "arquivo $configKind nao encontrado." }
 
-if ($Recriar) {
-    Write-Host "-Recriar: apagando o cluster e o state (dados dos bancos serao perdidos)"
-    if ((ClustersKind) -contains "revenda") {
-        if ((Invocar "kind" @("delete", "cluster", "--name", "revenda")) -ne 0) { Falhar "kind delete cluster falhou." }
-    }
-    Remove-Item -Path $statePath, "$statePath.backup" -Force -ErrorAction SilentlyContinue
-}
 
 # Idempotente: so cria se `kind get clusters` nao listar "revenda". Se o cluster foi
 # recriado com o state antigo, o Terraform percebe no refresh que os recursos sumiram e
@@ -109,6 +107,20 @@ if ((ClustersKind) -contains "revenda") {
 # Grava/atualiza o contexto kind-revenda no KUBECONFIG usado pelos providers do Terraform
 if ((Invocar "kind" @("export", "kubeconfig", "--name", "revenda")) -ne 0) { Falhar "kind export kubeconfig falhou." }
 
+# ------------------------------------------------------------------ servico de identidade (outro repositorio)
+$identidadeOk = $false
+for ($i = 1; $i -le 12; $i++) {
+    try {
+        $r = Invoke-WebRequest -Uri "http://localhost:8180/realms/revenda/.well-known/openid-configuration" -UseBasicParsing -TimeoutSec 5
+        if ($r.StatusCode -eq 200) { $identidadeOk = $true; break }
+    } catch { }
+    Start-Sleep -Seconds 5
+}
+if (-not $identidadeOk) {
+    Falhar "o realm revenda nao responde em http://localhost:8180. Suba antes o servico de identidade (repositorio fiap-soat-revenda-identidade, scripts\windows\04-subir-ambiente.ps1)."
+}
+Write-Host "Servico de identidade OK: http://localhost:8180/realms/revenda"
+
 # ------------------------------------------------------------------ terraform
 $codigo = Invocar "terraform" @("-chdir=$tfDir", "init", "-input=false", "-no-color", "-reconfigure", "-backend-config=path=$statePath")
 if ($codigo -ne 0) { Falhar "terraform init falhou (codigo $codigo)." }
@@ -119,32 +131,18 @@ if ($codigo -ne 0) { Falhar "terraform apply falhou (codigo $codigo). Diagnostic
 # ------------------------------------------------------------------ verificacao
 $null = Invocar "kubectl" @("config", "current-context")
 $null = Invocar "kubectl" @("get", "nodes", "-o", "wide")
-$null = Invocar "kubectl" @("get", "pods", "-A", "-o", "wide")
+$null = Invocar "kubectl" @("-n", "revenda", "get", "pods,svc", "-o", "wide")
 $null = Invocar "terraform" @("-chdir=$tfDir", "output", "-no-color", "urls")
 
-$pronto = $false
-for ($i = 1; $i -le 30; $i++) {
-    try {
-        $r = Invoke-WebRequest -Uri "http://localhost:8180/realms/revenda/.well-known/openid-configuration" -UseBasicParsing -TimeoutSec 5
-        if ($r.StatusCode -eq 200) { $pronto = $true; break }
-    } catch { }
-    Start-Sleep -Seconds 5
-}
-if ($pronto) { Write-Host "Keycloak OK: realm revenda publicado em http://localhost:8180/realms/revenda" }
-else { Write-Host "AVISO: o discovery do realm ainda nao respondeu (kubectl -n identidade logs deployment/keycloak)." }
-
 Write-Host ""
-Write-Host "==================== ambiente local ===================="
+Write-Host "==================== infraestrutura da API ===================="
 Write-Host "API (apos o CD)      http://localhost:8080   (Swagger: http://localhost:8080/docs)"
-Write-Host "Keycloak             http://localhost:8180   (admin: http://localhost:8180/admin/)"
-Write-Host "Conta do cliente     http://localhost:8180/realms/revenda/account"
+Write-Host "Identidade           http://localhost:8180   (outro repositorio: fiap-soat-revenda-identidade)"
 if (-not $SemBancoExposto) { Write-Host "Banco revenda        localhost:15432 (usuario revenda, banco revenda)" }
 Write-Host ""
-Write-Host "Segredos (PowerShell): ler e decodificar, por exemplo a senha do gestor.loja:"
-Write-Host '  $b = kubectl -n identidade get secret keycloak-gestor -o jsonpath="{.data.GESTOR_PASSWORD}"'
+Write-Host "Segredos da API (PowerShell): ler e decodificar, por exemplo o segredo do webhook:"
+Write-Host '  $b = kubectl -n revenda get secret revenda-webhook-secret -o jsonpath="{.data.WEBHOOK_SECRET}"'
 Write-Host '  [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))'
-Write-Host "Outros: keycloak-admin (KC_BOOTSTRAP_ADMIN_PASSWORD), revenda/revenda-webhook-secret"
-Write-Host "(WEBHOOK_SECRET), revenda/revenda-db-credentials (DB_PASSWORD)."
 Write-Host ""
 Write-Host "Aplicacao: merge na main ou  gh workflow run cd.yml  (CD no runner kind-local)."
 Write-Host "Log: $log"

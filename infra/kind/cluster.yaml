@@ -1,14 +1,20 @@
-# Cluster kind "revenda" (ADR-005). Criado pela CLI kind (v0.33.0), NAO pelo Terraform:
-# o provider comunitario tehcyx/kind nao tem assinatura de codigo e e bloqueado pelo
-# Smart App Control do Windows 11. Uso (idempotente no CD e em 04-subir-ambiente.ps1):
+# Cluster kind "revenda": a PLATAFORMA LOCAL compartilhada pelos dois servicos, cada um no
+# seu namespace e com o seu proprio Terraform/state (equivale a uma conta de nuvem comum):
+#   fiap-soat-revenda-identidade -> namespace identidade (Keycloak e keycloak-db)
+#   fiap-soat-revenda-veiculos   -> namespace revenda (API e revenda-db)
+# ESTE ARQUIVO E IDENTICO NOS DOIS REPOSITORIOS: o CD de cada um cria o cluster se ele
+# ainda nao existir (quem chegar primeiro), sempre com a mesma configuracao. Uma mudanca
+# aqui precisa de PR nos dois repositorios.
+# Criado pela CLI kind (v0.33.0), NAO pelo Terraform: o provider comunitario tehcyx/kind
+# nao tem assinatura de codigo e e bloqueado pelo Smart App Control do Windows 11.
 #   kind get clusters | grep -qx revenda || kind create cluster --config infra/kind/cluster.yaml --wait 120s
 # Portas do host so em 127.0.0.1 (nada exposto na rede local). Mudar este arquivo so
-# tem efeito recriando o cluster (05-destruir-ambiente.ps1 + 04-subir-ambiente.ps1).
+# tem efeito recriando o cluster.
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
 name: revenda
 networking:
-  # Usada tambem na NetworkPolicy do revenda-db (variavel pod_subnet do Terraform)
+  # Usada tambem na NetworkPolicy do revenda-db (variavel pod_subnet do Terraform da API)
   podSubnet: 10.244.0.0/16
 nodes:
   - role: control-plane

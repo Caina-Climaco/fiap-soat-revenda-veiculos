@@ -98,7 +98,7 @@ Catálogo de tipos de problema:
 | Testes e2e (somente ambiente local) | Resource Owner Password Credentials | `revenda-e2e` (público, `directAccessGrantsEnabled`) |
 | Gateway de pagamento | Não usa OAuth; segredo compartilhado no header `X-Webhook-Secret` | — |
 
-Endpoints do Keycloak (realm `revenda`), a partir do host:
+Endpoints do Keycloak (realm `revenda`, implantado pelo repositório [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade)), a partir do host:
 
 - Discovery: `http://localhost:8180/realms/revenda/.well-known/openid-configuration`
 - Autorização: `http://localhost:8180/realms/revenda/protocol/openid-connect/auth`
