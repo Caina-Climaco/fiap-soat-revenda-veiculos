@@ -338,6 +338,13 @@ resource "kubernetes_deployment_v1" "grafana" {
             name  = "GF_LOG_MODE"
             value = "console"
           }
+          # Grafana 13.2 tenta atualizar os plugins pre-instalados (inclusive o do Prometheus)
+          # na subida; com a raiz somente leitura a troca falha e o plugin fica sem registro
+          # ("Plugin not registered"). Os plugins ficam na versao que vem na imagem.
+          env {
+            name  = "GF_PLUGINS_PREINSTALL_AUTO_UPDATE"
+            value = "false"
+          }
           env {
             name  = "GF_AUTH_ANONYMOUS_ENABLED"
             value = "true"
