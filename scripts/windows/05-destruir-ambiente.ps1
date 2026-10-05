@@ -1,17 +1,17 @@
-# Destroi a plataforma local: terraform destroy (mesmo state do CD) se o cluster existir,
-# depois kind delete cluster (o cluster e da CLI kind, nao do Terraform; ADR-005) e por
-# fim remove o state. Os dados dos bancos (PVCs no no do kind) sao PERDIDOS.
+# Remove a API do cluster local: terraform destroy do state DESTE repositorio (namespace
+# revenda, revenda-db, segredos e metrics-server; o Deployment da API some junto com o
+# namespace) e remove o state. Os dados do revenda-db sao PERDIDOS. O servico de
+# identidade (outro repositorio) nao e tocado; o cluster kind, compartilhado, so e apagado
+# com -ApagarCluster (ADR-005, ADR-014).
 #
 # Uso:
-#   powershell -ExecutionPolicy Bypass -File .\scripts\windows\05-destruir-ambiente.ps1 [-Forcar]
-#     -Forcar  nao pede confirmacao
-#
-# O state e sempre removido no final: sem cluster, nenhum recurso dele existe mais (os
-# segredos serao gerados de novo na proxima subida). Uma falha do terraform destroy so
-# gera aviso, porque o kind delete cluster apaga tudo de qualquer forma.
+#   powershell -ExecutionPolicy Bypass -File .\scripts\windows\05-destruir-ambiente.ps1 [-Forcar] [-ApagarCluster]
+#     -Forcar         nao pede confirmacao
+#     -ApagarCluster  tambem apaga o cluster kind "revenda" (derruba a identidade junto)
 # Log: .setup\relatorio-ambiente-destruir.txt. Arquivo somente ASCII (Windows PowerShell 5.1).
 param(
-    [switch]$Forcar
+    [switch]$Forcar,
+    [switch]$ApagarCluster
 )
 
 $ErrorActionPreference = "Continue"
@@ -57,7 +57,9 @@ if ((Invocar "docker" @("version", "--format", "docker {{.Server.Version}}")) -n
 }
 
 if (-not $Forcar) {
-    Write-Host "Isto apaga o cluster kind 'revenda', os bancos (revenda e keycloak) e os segredos gerados."
+    $alvo = "o namespace revenda (API, revenda-db e segredos)"
+    if ($ApagarCluster) { $alvo += " E o cluster kind 'revenda' inteiro (identidade inclusive)" }
+    Write-Host "Isto apaga $alvo."
     $resposta = Read-Host "Digite SIM para continuar"
     if ($resposta -cne "SIM") {
         Write-Host "Cancelado."
@@ -69,7 +71,7 @@ if (-not $Forcar) {
 # Mesmos caminhos do 04-subir-ambiente.ps1 (o cd.yml usa este state via /revenda-state)
 $perfil = $env:USERPROFILE -replace '\\', '/'
 $stateDir = "$perfil/.revenda"
-$statePath = "$stateDir/terraform.tfstate"
+$statePath = "$stateDir/revenda-api.tfstate"
 $env:TF_DATA_DIR = "$stateDir/terraform-data"
 $env:TF_IN_AUTOMATION = "1"
 $env:TF_INPUT = "0"
@@ -85,22 +87,24 @@ if ((ClustersKind) -contains "revenda") {
         if ($codigo -eq 0) {
             $codigo = Invocar "terraform" @("-chdir=$tfDir", "destroy", "-input=false", "-no-color", "-auto-approve")
         }
-        if ($codigo -ne 0) { Write-Host "AVISO: terraform destroy falhou (codigo $codigo); seguindo com kind delete cluster." }
+        if ($codigo -ne 0) { Falhar "terraform destroy falhou (codigo $codigo); o state foi mantido em $statePath." }
     } else {
-        Write-Host "Sem state em $statePath; apenas o cluster kind sera apagado."
+        Write-Host "Sem state em $statePath; nada da API a destruir pelo Terraform."
     }
-    if ((Invocar "kind" @("delete", "cluster", "--name", "revenda")) -ne 0) { Falhar "kind delete cluster falhou." }
+    if ($ApagarCluster) {
+        if ((Invocar "kind" @("delete", "cluster", "--name", "revenda")) -ne 0) { Falhar "kind delete cluster falhou." }
+    }
 } else {
     Write-Host "Cluster kind 'revenda' nao existe; nada a destruir no cluster."
 }
 
-# Sem cluster, os recursos do state nao existem mais (o state tem segredos em texto claro)
+# Os recursos do state nao existem mais (o state tem segredos em texto claro)
 Remove-Item -Path $statePath, "$statePath.backup" -Force -ErrorAction SilentlyContinue
 Write-Host "State removido: $statePath"
 
-if ((ClustersKind) -contains "revenda") { Falhar "o cluster 'revenda' ainda existe." }
+if ($ApagarCluster -and ((ClustersKind) -contains "revenda")) { Falhar "o cluster 'revenda' ainda existe." }
 Write-Host ""
-Write-Host "Ambiente destruido. Para recriar: scripts\windows\04-subir-ambiente.ps1 e depois o CD."
+Write-Host "API removida. Para recriar: scripts\windows\04-subir-ambiente.ps1 e depois o CD."
 Write-Host "As imagens revenda-api:<sha> continuam no Docker local (docker image prune para limpar)."
 Write-Host "Log: $log"
 Stop-Transcript | Out-Null

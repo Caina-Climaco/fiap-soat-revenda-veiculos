@@ -13,10 +13,11 @@ Este documento reúne o modelo de ameaças da solução, os controles de seguran
 | Chave privada de assinatura dos tokens | Keycloak (banco `keycloak`) | Crítico: permitiria forjar qualquer token |
 | Estado das vendas e do estoque | Banco `revenda` | Alto: venda dupla, venda sem pagamento |
 | Segredo do webhook | Secret `revenda-webhook-secret` | Alto: efetivação de vendas sem pagamento |
-| Segredos de banco e admin do Keycloak | Secrets do Kubernetes e state do Terraform | Crítico |
+| Segredos do banco da API e do webhook | Secrets do namespace `revenda` e state `revenda-api.tfstate` (este repositório) | Crítico |
+| Segredos do banco e do admin do Keycloak | Secrets do namespace `identidade` e state `identidade.tfstate` (repositório de identidade; fora do alcance do pipeline da API, exceto os Secrets de contrato `keycloak-gestor` e `keycloak-e2e`, lidos pelo e2e) | Crítico |
 | Pipeline de CD e runner self-hosted | PC do autor | Crítico: execução de código arbitrário com acesso ao cluster |
 
-Fronteiras de confiança: (1) internet/navegador → API e Keycloak; (2) gateway externo → webhook; (3) namespace `revenda` ↔ namespace `identidade`; (4) GitHub → runner self-hosted.
+Fronteiras de confiança: (1) internet/navegador → API e Keycloak; (2) gateway externo → webhook; (3) namespace `revenda` ↔ namespace `identidade`; (4) GitHub → runners self-hosted; (5) repositório da API ↔ repositório de identidade, que só se comunicam pelo contrato publicado (OIDC/JWT e Secrets de contrato do ambiente local).
 
 ## 2. Modelo de ameaças (STRIDE por componente)
 
@@ -24,17 +25,17 @@ Fronteiras de confiança: (1) internet/navegador → API e Keycloak; (2) gateway
 |---|---|---|---|---|---|---|
 | **revenda-api (endpoints com JWT)** | Token forjado ou de outro emissor → assinatura RS256 via JWKS, `iss`, `aud`, `azp`, `exp` validados; `alg` fixo | Alteração de claims → assinatura; alteração de preço pelo cliente → preço vem do banco, não do corpo | Ações sem trilha → log estruturado com `sub`, `request_id`, eventos de domínio | Acesso a venda alheia (BOLA) → filtro por `comprador_id`; 404 para não dono; erros sem stack trace | Abuso das listagens → paginação com `limite` ≤ 100 e `deslocamento` ≤ 1.000.000; HPA; *rate limiting* na borda como evolução ([ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md)) | Cliente chamando rota de gestor → RBAC por `realm_access.roles` em cada rota |
 | **Webhook de pagamento** | Chamador se passando pelo gateway → `X-Webhook-Secret` comparado em tempo constante | Replay de notificação → idempotência por estado da venda; HMAC do corpo com timestamp como evolução | Gateway nega ter enviado → log do payload (sem segredo) e do `request_id` | Segredo exposto em log → header nunca é registrado | Inundação de chamadas → custo baixo por chamada; rate limiting como evolução | Efetivar venda sem pagamento → só com segredo válido |
-| **Keycloak** | Senha fraca / força bruta → política de senha do realm e *brute force detection* habilitados | Alteração de papéis → console admin com senha gerada pelo Terraform, não exposta no repositório | Logins não rastreados → eventos de login e de admin habilitados no realm | Vazamento de dados pessoais pelo token → access token só com `sub`, papéis e audiência (`profile` e `email` apenas opcionais nos clients) | Sobrecarga do login → fora do escopo local | Autocadastro obtendo `gestor` → papel padrão é apenas `cliente`; `gestor` só por admin |
+| **Keycloak** | Senha fraca / força bruta → política de senha do realm e *brute force detection* habilitados | Alteração de papéis → console admin com senha gerada pelo Terraform do repositório de identidade, que nunca chega a este repositório nem ao seu pipeline | Logins não rastreados → eventos de login e de admin habilitados no realm | Vazamento de dados pessoais pelo token → access token só com `sub`, papéis e audiência (`profile` e `email` apenas opcionais nos clients) | Sobrecarga do login → fora do escopo local | Autocadastro obtendo `gestor` → papel padrão é apenas `cliente`; `gestor` só por admin |
 | **PostgreSQL revenda** | Conexão de pod não autorizado → NetworkPolicy + credencial por Secret | SQL injection → SQLAlchemy com parâmetros vinculados, sem SQL concatenado | — | Leitura do banco → não contém dados pessoais (só pseudônimo); logs do SQLAlchemy sem valores de parâmetros (`hide_parameters`) | Esgotamento de conexões → pool limitado por réplica | Usuário da aplicação com DDL → evolução: separar papel de migração e de aplicação |
 | **PostgreSQL keycloak** | Idem → NetworkPolicy só a partir do Keycloak | — | — | Exposição de dados pessoais → banco não exposto ao host; instância separada | — | API sem credencial para este banco |
-| **CI/CD e runner self-hosted** | PR de fork executando no runner → CD só em `push` na `main`; fork PRs exigem aprovação | Alteração do pipeline sem revisão → `main` protegida, PR e CI obrigatórios | Deploy sem autoria → cada deploy vinculado a SHA e PR | Segredos no repositório → gerados pelo Terraform, `.gitignore`, varredura no CI | Deploys simultâneos → `concurrency: deploy-local` | Runner com admin no host → usuário dedicado sem sudo |
+| **CI/CD e runner self-hosted** | PR de fork executando no runner → CD só em `push` na `main`; fork PRs exigem aprovação | Alteração do pipeline sem revisão → `main` protegida, PR e CI obrigatórios | Deploy sem autoria → cada deploy vinculado a SHA e PR | Segredos no repositório → gerados pelo Terraform, `.gitignore`, varredura no CI | Deploys simultâneos → `concurrency: deploy-local` | Runner com admin no host → usuário dedicado sem sudo; um runner e um state por repositório, e o CD da API não implanta nem altera o Keycloak |
 | **Imagem e dependências** | Imagem base adulterada → imagens oficiais com versão fixa | Dependência vulnerável → Trivy CRITICAL/HIGH no CI; lockfile | — | — | — | Container como root → `runAsNonRoot`, `readOnlyRootFilesystem`, sem capabilities |
 
 ## 3. Controles
 
 ### 3.1 Autenticação (OIDC) e validação do JWT
 
-- Protocolo **OpenID Connect** com o Keycloak como provedor. Swagger UI e front-end usam **Authorization Code + PKCE (S256)** com client público, sem segredo no navegador. O client `revenda-e2e` (password grant) existe só para os testes automatizados no ambiente local e não deve existir em produção (o password grant é desaconselhado pelas boas práticas atuais de OAuth).
+- Protocolo **OpenID Connect** com o Keycloak como provedor. Swagger UI e front-end usam **Authorization Code + PKCE (S256)** com client público, sem segredo no navegador. O client `revenda-e2e` (password grant) existe só para os testes automatizados no ambiente local e não deve existir em produção (o password grant é desaconselhado pelas boas práticas atuais de OAuth). Também só local, o client técnico `revenda-e2e-admin` (client credentials) permite aos testes criar e apagar compradores com apenas `manage-users`, `view-users` e `query-users` do realm `revenda`; os testes não usam o admin do realm `master`.
 - A API é um *resource server*: não armazena senhas nem sessões. Cada requisição é autenticada pelo access token, validado localmente:
   1. **Assinatura RS256** com a chave pública do **JWKS** do realm, selecionada pelo `kid`. O algoritmo é fixado no código (lista permitida = `RS256`), o que elimina ataques de `alg: none` e de confusão RS256/HS256.
   2. **`iss`** igual ao emissor configurado (`http://localhost:8180/realms/revenda`).
@@ -42,7 +43,7 @@ Fronteiras de confiança: (1) internet/navegador → API e Keycloak; (2) gateway
   4. **`aud`** contendo `revenda-api` e **`azp`** na lista de clients autorizados: um token emitido pelo mesmo realm para outra aplicação não é aceito.
 - O JWKS é obtido pelo endereço interno do Service do Keycloak e mantido em cache, com recarga ao surgir um `kid` novo (rotação de chaves) limitada a uma por minuto, para que tokens com `kid` aleatório não virem um vetor de negação de serviço contra o Keycloak.
 - Tempo de vida do access token: 5 minutos (padrão do Keycloak), o que limita a janela de uso de um token vazado.
-- Conteúdo do access token: `sub`, `realm_access.roles`, `aud` (`revenda-api`), `azp` e as claims técnicas (`iss`, `exp`, `iat`). Nome e e-mail não são incluídos, porque os escopos `profile` e `email` são apenas opcionais nos clients `revenda-swagger` e `revenda-e2e`; CPF e telefone nunca são mapeados para o token. O realm é importado com a estratégia `IGNORE_EXISTING` (só na criação): num ambiente já existente, a mudança de escopos só vale depois de recriar o realm ou de aplicá-la pelo console de administração.
+- Conteúdo do access token: `sub`, `realm_access.roles`, `aud` (`revenda-api`), `azp` e as claims técnicas (`iss`, `exp`, `iat`). Nome e e-mail não são incluídos, porque os escopos `profile` e `email` são apenas opcionais nos clients `revenda-swagger` e `revenda-e2e`; CPF e telefone nunca são mapeados para o token. Essas regras são parte do contrato do realm, mantido e testado (contra um Keycloak real, no job `realm` do CI) no repositório [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade).
 
 ### 3.2 Autorização (RBAC) e controle por objeto
 
@@ -57,18 +58,30 @@ Fronteiras de confiança: (1) internet/navegador → API e Keycloak; (2) gateway
 |---|---|
 | Tokens | Só as claims necessárias (`sub`, papéis, `aud`, `azp`); sem dados pessoais. Nos clients `revenda-swagger` e `revenda-e2e`, os escopos `profile` e `email` são apenas opcionais |
 | Pods | `runAsNonRoot: true`, `runAsUser: 10001`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `readOnlyRootFilesystem: true` (com `emptyDir` em `/tmp`), `seccompProfile: RuntimeDefault`, `automountServiceAccountToken: false` |
-| Rede | NetworkPolicy: banco da API só aceita pods `app=revenda-api` e `app=revenda-migracao`; banco do Keycloak só aceita `app=keycloak` e nunca é exposto. O banco da API é publicado em `127.0.0.1:15432` (NodePort 30432) apenas para a demonstração do vídeo, com `expor_banco_revenda = true` (padrão); `false` o torna ClusterIP |
-| Credenciais | API sem credencial do banco do Keycloak e vice-versa; Secrets montados apenas nos pods que os usam |
-| Pipelines | `permissions: contents: read` nos workflows; o runner self-hosted roda como usuário sem privilégio de administrador |
+| Rede | NetworkPolicy: banco da API só aceita pods `app=revenda-api` e `app=revenda-migracao`; banco do Keycloak só aceita `app=keycloak` e nunca é exposto (política declarada no repositório de identidade). O banco da API é publicado em `127.0.0.1:15432` (NodePort 30432) apenas para a demonstração do vídeo, com `expor_banco_revenda = true` (padrão); `false` o torna ClusterIP |
+| Credenciais | API sem credencial do banco do Keycloak e vice-versa; Secrets montados apenas nos pods que os usam; o state e o pipeline da API não contêm segredos da identidade; o e2e usa o client técnico `revenda-e2e-admin` em vez do admin do realm `master` |
+| Pipelines | `permissions: contents: read` nos workflows; o runner self-hosted roda como usuário sem privilégio de administrador; cada repositório tem o próprio runner, que só aplica o próprio namespace com o próprio state |
 | Banco | Evolução: papel `revenda_migracao` (DDL) separado de `revenda_app` (somente DML nos schemas `catalogo` e `vendas`) |
+
+**Camadas da separação entre identidade e dados transacionais.** A separação exigida pelo enunciado ("totalmente apartado") é aplicada em todas as camadas, de modo que comprometer uma delas não dá acesso aos dados pessoais:
+
+| Camada | API (Catálogo e Vendas) | Identidade (Keycloak) |
+|---|---|---|
+| Repositório e revisão | `fiap-soat-revenda-veiculos` | [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade) |
+| Pipeline de CI/CD e runner | CI `qualidade`/`testes`/`imagem`/`infra`; CD no `revenda-runner` | CI `qualidade`/`realm`/`infra`; CD no `revenda-runner-identidade` |
+| State do Terraform (com segredos) | `revenda-api.tfstate` | `identidade.tfstate` |
+| Namespace Kubernetes | `revenda` | `identidade` |
+| Banco PostgreSQL | `revenda-db` (sem dados pessoais) | `keycloak-db` (nome, e-mail, CPF, telefone, credenciais) |
+| Credenciais | `revenda-db-credentials`, `revenda-webhook-secret` | `keycloak-db-credentials`, `keycloak-admin`, `keycloak-gestor`, `keycloak-e2e` |
+| Ligação entre os dois | Só o contrato público: JWT validado pelo JWKS, `sub` como pseudônimo; no ambiente local, o e2e lê os Secrets de contrato `keycloak-gestor` e `keycloak-e2e` | |
 
 Sobre o suporte a NetworkPolicy: o CNI padrão do kind (kindnet) passou a implementar NetworkPolicy a partir da versão 0.24. O projeto exige essa versão ou superior e valida o bloqueio no teste de fumaça; se o CNI não aplicar as políticas, elas permanecem como declaração de intenção versionada.
 
 ### 3.4 Gestão de segredos
 
-- Todos os segredos (senhas dos dois bancos, admin do Keycloak, senha do `gestor.loja` e segredo do webhook) são **gerados pelo Terraform** com `random_password` e gravados como `kubernetes_secret` ([ADR-011](adrs/ADR-011-segredos-terraform.md)). Nenhum valor sensível é digitado, versionado ou colocado em ConfigMap.
+- Todos os segredos são **gerados pelo Terraform** com `random_password` e gravados como `kubernetes_secret` ([ADR-011](adrs/ADR-011-segredos-terraform.md)), cada um pelo repositório dono dele: senha do banco da API e segredo do webhook por este repositório; senha do banco do Keycloak, do admin, do `gestor.loja` e do client `revenda-e2e-admin` pelo repositório de identidade ([ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md)). Nenhum valor sensível é digitado, versionado ou colocado em ConfigMap.
 - `*.tfstate*`, `.terraform/`, kubeconfig e `.env` estão no `.gitignore`; o repositório tem apenas `.env.example` com valores fictícios.
-- O state do Terraform contém os segredos em texto claro; por isso ele fica fora do repositório, em diretório do usuário do runner com permissão restrita (ver [08-ci-cd-infra.md](08-ci-cd-infra.md)).
+- O state do Terraform contém os segredos em texto claro; por isso ele fica fora do repositório (`%USERPROFILE%\.revenda\revenda-api.tfstate`; o da identidade é outro arquivo, `identidade.tfstate`), em diretório do usuário do runner com permissão restrita (ver [08-ci-cd-infra.md](08-ci-cd-infra.md)).
 - **Lição aprendida**: na fase 2, `secret.yaml`, kubeconfig e `tfstate` foram versionados por engano. Nesta fase, além do `.gitignore`, o CI executa uma varredura de segredos (Trivy com o *scanner* `secret` no repositório) e o template de PR contém o item de verificação "nenhum segredo adicionado".
 - Rotação: alterar o `keepers` do `random_password` e reaplicar o Terraform gera novo valor; os pods são reiniciados pelo CD. Para produção, a evolução é um cofre de segredos (Vault, Sealed Secrets ou External Secrets).
 
@@ -157,7 +170,7 @@ Nenhum dado pessoal sensível (art. 5º, II) é tratado.
 | **Adequação** (art. 6º, II) | Cada dado coletado tem relação direta com a compra de um veículo (ex.: CPF para o contrato e a transferência do veículo) |
 | **Necessidade / minimização** (art. 6º, III) | Coleta do mínimo necessário; a API transacional não recebe nem armazena nome, e-mail, CPF ou telefone, apenas o `sub`; o token não carrega dados de perfil; logs registram o pseudônimo, não dados de cadastro |
 | **Segurança** (art. 6º, VII) | Controles técnicos das seções 3.1 a 3.9: segregação física, RBAC, segredos gerados, containers endurecidos |
-| **Prevenção** (art. 6º, VIII) | Privacidade desde a concepção: a separação identidade × transacional foi decisão de arquitetura ([ADR-001](adrs/ADR-001-keycloak-identidade.md), [ADR-004](adrs/ADR-004-postgresql-schemas.md)), não um ajuste posterior; modelagem de ameaças antes da implementação |
+| **Prevenção** (art. 6º, VIII) | Privacidade desde a concepção: a separação identidade × transacional foi decisão de arquitetura ([ADR-001](adrs/ADR-001-keycloak-identidade.md), [ADR-004](adrs/ADR-004-postgresql-schemas.md)), não um ajuste posterior, e foi reforçada com a entrega da identidade em repositório próprio ([ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md)); modelagem de ameaças antes da implementação |
 
 O art. 46 impõe ao agente de tratamento a adoção de medidas de segurança, técnicas e administrativas, aptas a proteger os dados pessoais de acessos não autorizados e de situações acidentais ou ilícitas; o seu § 2º determina que essas medidas sejam observadas desde a fase de concepção do produto ou do serviço até a sua execução. O art. 49 reforça que os sistemas utilizados no tratamento devem ser estruturados para atender aos requisitos de segurança e aos princípios gerais da Lei. A arquitetura descrita neste documento é a resposta técnica a esses dispositivos.
 
@@ -174,7 +187,7 @@ O art. 13, § 4º, define pseudonimização como o tratamento por meio do qual u
 Aplicação no projeto:
 
 - A tabela `vendas.vendas` guarda apenas `comprador_id` = claim `sub` do token, um UUID gerado pelo Keycloak sem significado fora dele.
-- A "informação adicional" que permite a reidentificação (o registro do usuário com nome, e-mail e CPF) fica em outra instância de banco, em outro namespace, com outras credenciais e acesso restrito por NetworkPolicy, ou seja, "mantida separadamente [...] em ambiente controlado e seguro".
+- A "informação adicional" que permite a reidentificação (o registro do usuário com nome, e-mail e CPF) fica em outra instância de banco, em outro namespace, com outras credenciais e acesso restrito por NetworkPolicy, declarada e implantada por outro repositório, com outro pipeline e outro state do Terraform; ou seja, "mantida separadamente [...] em ambiente controlado e seguro" (ver as camadas da separação na seção 3.3).
 - **Ressalva importante**: dado pseudonimizado continua sendo dado pessoal, porque a própria revenda (controladora) consegue reidentificá-lo. A pseudonimização reduz o impacto de um vazamento do banco transacional, mas não retira esse banco do alcance da LGPD. Isso difere do dado **anonimizado** (art. 5º, III, e art. 12), que deixa de ser considerado dado pessoal.
 
 ### 5.5 Direitos do titular (art. 18)

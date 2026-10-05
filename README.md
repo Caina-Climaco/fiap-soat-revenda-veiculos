@@ -5,6 +5,8 @@
 Trabalho Substitutivo do Tech Challenge — FIAP PósTech Software Architecture (SOAT), Fase 3.
 Autor: Cainã Clímaco (trabalho individual).
 
+> **Esta entrega tem dois repositórios.** Este é o da **API** (Catálogo e Vendas). O serviço de **identidade** (Keycloak, cadastro e autorização de compradores), que o enunciado exige "totalmente apartado do resto da solução", está em **[fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade)**, com código, Terraform, state, CI, CD e runner próprios ([ADR-014](docs/adrs/ADR-014-identidade-em-repositorio-proprio.md)). Para subir o ambiente, comece por ele.
+
 Este README segue o que o enunciado pede: [o que é o projeto](#1-o-que-é), [como foi implementado](#2-como-foi-implementado), [como usar localmente](#3-como-usar-localmente) e [como testar](#4-como-testar). Os detalhes de cada decisão estão em [`docs/`](docs/01-visao-geral.md).
 
 ## Sumário
@@ -16,7 +18,8 @@ Este README segue o que o enunciado pede: [o que é o projeto](#1-o-que-é), [co
 5. [Fluxo de contribuição](#5-fluxo-de-contribuição)
 6. [Estrutura de pastas](#6-estrutura-de-pastas)
 7. [Limitações conhecidas](#7-limitações-conhecidas)
-8. [Autor](#8-autor)
+8. [Migração para dois repositórios](#8-migração-para-dois-repositórios)
+9. [Autor](#9-autor)
 
 ---
 
@@ -34,7 +37,7 @@ Pedidas no enunciado:
 |---|---|
 | Cadastrar veículo (marca, modelo, ano, cor, preço) | `POST /api/v1/veiculos` (gestor) |
 | Editar veículo | `PATCH /api/v1/veiculos/{id}` (gestor) |
-| Cadastro de compradores em serviço de identidade separado | Tela de registro do Keycloak (realm `revenda`) |
+| Cadastro de compradores em serviço de identidade separado | Tela de registro do Keycloak (realm `revenda`), no [repositório de identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade) |
 | Compra pela internet, só por pessoas cadastradas | `POST /api/v1/vendas` (cliente) |
 | Efetivação da compra | `POST /api/v1/pagamentos/webhook` (gateway de pagamento simulado) |
 | Listar veículos à venda, do mais barato ao mais caro | `GET /api/v1/veiculos/a-venda` (público) |
@@ -54,7 +57,7 @@ Descobertas na modelagem (o enunciado avisa que "nem todos os campos e funcional
 
 ### 1.3 Identidade separada dos dados transacionais
 
-Cadastro, login e papéis ficam no **Keycloak**, com banco PostgreSQL **próprio**, em outra instância e em outro namespace do Kubernetes. Nome, sobrenome, e-mail, CPF e telefone existem só ali. A API não tem credencial para esse banco: ela valida o token (JWT) e guarda na venda apenas o `comprador_id`, que é o identificador opaco `sub` do token.
+Cadastro, login e papéis ficam no **Keycloak**, que é outro sistema: **outro repositório**, outro pipeline de CI/CD, outro state do Terraform, outro namespace do Kubernetes (`identidade`) e banco PostgreSQL **próprio**, em outra instância. Nome, sobrenome, e-mail, CPF e telefone existem só ali. Este repositório não contém o realm, nem os segredos, nem a infraestrutura do Keycloak; a API não tem credencial para o banco dele: ela valida o token (JWT) e guarda na venda apenas o `comprador_id`, que é o identificador opaco `sub` do token.
 
 Do ponto de vista da LGPD, isso aplica o princípio da necessidade (art. 6º, III): o banco transacional não contém dados pessoais diretos, e a ligação entre venda e pessoa só pode ser refeita com a informação mantida separadamente no serviço de identidade. A análise completa (base legal, direitos do titular, exclusão de conta) está em [docs/07](docs/07-seguranca-lgpd.md).
 
@@ -77,7 +80,7 @@ flowchart LR
     dbr[("PostgreSQL revenda<br/>schemas catalogo e vendas<br/>sem dados pessoais")]
   end
 
-  subgraph NSI["namespace identidade"]
+  subgraph NSI["namespace identidade (repositório fiap-soat-revenda-identidade)"]
     kc["Keycloak 26.7.1<br/>realm revenda"]
     dbk[("PostgreSQL keycloak<br/>nome, e-mail, CPF, telefone")]
   end
@@ -91,13 +94,20 @@ flowchart LR
   kc -->|"JDBC"| dbk
 ```
 
+Os dois namespaces rodam no mesmo cluster kind local (`revenda`), que é a plataforma compartilhada; cada repositório implanta só o seu namespace, com Terraform e state próprios. A API depende apenas do **contrato público** da identidade: issuer `http://localhost:8180/realms/revenda`, JWKS interno `http://keycloak.identidade.svc.cluster.local:8080/realms/revenda/protocol/openid-connect/certs`, audiência `revenda-api`, papéis `cliente` e `gestor` e client do Swagger `revenda-swagger` (configurados em [`k8s/base/configmap.yaml`](k8s/base/configmap.yaml)).
+
+| Repositório | Conteúdo | Pipelines |
+|---|---|---|
+| [fiap-soat-revenda-veiculos](https://github.com/Caina-Climaco/fiap-soat-revenda-veiculos) (este) | API, migrações, manifestos `k8s/`, Terraform do namespace `revenda` (banco, segredos, NetworkPolicy, metrics-server) | CI `qualidade`, `testes`, `imagem`, `infra`; CD no runner `revenda-runner` com e2e |
+| [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade) | Realm `revenda` versionado, Terraform do namespace `identidade` (Keycloak, banco do Keycloak, segredos, NetworkPolicy, Job `keycloak-reconciliar`) | CI `qualidade`, `realm` (Keycloak real e testes de contrato), `infra`; CD no runner `revenda-runner-identidade` |
+
 ### 2.2 Stack
 
 | Camada | Tecnologia |
 |---|---|
 | API | Python 3.12, FastAPI, Pydantic v2, SQLAlchemy 2 (síncrono), Alembic, PyJWT (JWKS), psycopg 3, Uvicorn |
-| Identidade | Keycloak 26.7.1 (`start-dev --import-realm`), realm versionado em [`keycloak/realm-revenda.json`](keycloak/README.md) |
-| Bancos | PostgreSQL 16 (duas instâncias: `revenda` e `keycloak`) |
+| Identidade (outro repositório) | Keycloak 26.7.1, realm versionado em `keycloak/realm-revenda.json` do [repositório de identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade) |
+| Bancos | PostgreSQL 16 (`revenda`, deste repositório; o `keycloak` é outra instância, do repositório de identidade) |
 | Infraestrutura | Docker Desktop, kind (Kubernetes 1.34), Terraform (providers `kubernetes`, `helm`, `random`), kustomize, metrics-server |
 | CI/CD | GitHub Actions: CI no runner hospedado, CD em runner self-hosted em container |
 | Qualidade | pytest, pytest-cov, ruff, mypy (strict), import-linter, Trivy, kubeconform, hadolint, shellcheck |
@@ -118,18 +128,18 @@ Requisitos e rastreabilidade em [docs/03](docs/03-requisitos.md).
 
 Uma única API (`revenda-api`) com dois módulos, `catalogo` e `vendas`, cada um com as camadas `domain`, `application`, `infrastructure` e `interfaces`. O domínio usa só a biblioteca padrão; casos de uso não conhecem FastAPI nem SQLAlchemy; Vendas fala com Catálogo apenas pela porta `CatalogoPort`, ligada em `composicao.py`. Essas regras são verificadas no CI pelo **import-linter** (contratos em `pyproject.toml`) e por um teste de arquitetura.
 
-Por que monólito modular e não microsserviços: a separação exigida pelo enunciado é identidade × transacional, e ela é física (Keycloak à parte). Entre Catálogo e Vendas basta a fronteira lógica, o que permite reservar o veículo e criar a venda na **mesma transação** sem saga nem mensageria ([ADR-002](docs/adrs/ADR-002-monolito-modular.md)). Cada módulo tem seu schema (`catalogo`, `vendas`) e não há chave estrangeira entre eles ([ADR-004](docs/adrs/ADR-004-postgresql-schemas.md)).
+Por que monólito modular e não microsserviços: a separação exigida pelo enunciado é identidade × transacional, e ela é física (Keycloak em outro repositório, namespace e banco). Entre Catálogo e Vendas basta a fronteira lógica, o que permite reservar o veículo e criar a venda na **mesma transação** sem saga nem mensageria ([ADR-002](docs/adrs/ADR-002-monolito-modular.md)). Cada módulo tem seu schema (`catalogo`, `vendas`) e não há chave estrangeira entre eles ([ADR-004](docs/adrs/ADR-004-postgresql-schemas.md)).
 
-### 2.5 Keycloak
+### 2.5 Keycloak (serviço de identidade, outro repositório)
 
-- Realm `revenda` importado na subida: autocadastro habilitado, login por e-mail, e-mail único, proteção contra força bruta, idioma `pt-BR`.
-- Perfil de usuário declarativo: nome, sobrenome, e-mail e **CPF** obrigatórios (11 dígitos), telefone opcional.
+O Keycloak e o realm `revenda` são mantidos no [repositório de identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade); a referência completa (configuração do realm, segredos, implantação e o contrato publicado) está no `README.md` e em `docs/contrato-identidade.md` daquele repositório. O que a API consome:
+
+- Realm `revenda` com autocadastro (nome, sobrenome, e-mail e **CPF** obrigatórios, telefone opcional), login por e-mail e idioma `pt-BR`.
 - Papéis `cliente` (padrão de todo autocadastro) e `gestor` (usuário seed `gestor.loja`).
-- Clients: `revenda-swagger` (público, Authorization Code + PKCE S256, usado pelo botão *Authorize* do Swagger), `revenda-e2e` (password grant, **só no ambiente local**, para os testes e2e) e `revenda-api` (apenas audiência).
+- Clients: `revenda-swagger` (público, Authorization Code + PKCE S256, usado pelo botão *Authorize* do Swagger), `revenda-api` (apenas audiência) e, **só no ambiente local**, `revenda-e2e` (password grant, para obter tokens nos testes) e `revenda-e2e-admin` (client credentials com apenas `manage-users`, `view-users` e `query-users` do realm `revenda`, para os testes criarem e apagarem compradores).
 - A API valida assinatura RS256 pelo JWKS (em cache), `iss`, `exp`, `aud = revenda-api` e `azp`; os papéis vêm de `realm_access.roles`.
-- A senha do `gestor.loja` não está no repositório: o arquivo de realm usa o placeholder `${GESTOR_PASSWORD}`, preenchido a partir de um Secret gerado pelo Terraform.
 
-Detalhes em [keycloak/README.md](keycloak/README.md) e [ADR-001](docs/adrs/ADR-001-keycloak-identidade.md).
+Decisão em [ADR-001](docs/adrs/ADR-001-keycloak-identidade.md) e, sobre a separação em outro repositório, [ADR-014](docs/adrs/ADR-014-identidade-em-repositorio-proprio.md).
 
 ### 2.6 Concorrência e expiração da reserva
 
@@ -144,8 +154,8 @@ A compra devolve um `codigo_pagamento` (`PAG-` + 12 hexadecimais). O gateway, ex
 
 Tudo roda no PC do autor (Windows 11, Docker Desktop), sem nuvem:
 
-- **Cluster kind** `revenda` criado pela **CLI `kind`** a partir de [`infra/kind/cluster.yaml`](infra/kind/cluster.yaml) (um nó, imagem fixada por digest, portas do host em `127.0.0.1`: 8080 → API, 8180 → Keycloak, 15432 → banco da API para demonstração). O plano original usava o provider Terraform `tehcyx/kind`, mas o binário dele não tem assinatura de código e foi bloqueado pelo **Smart App Control** do Windows 11; a CLI `kind` é assinada ([ADR-005](docs/adrs/ADR-005-kind-terraform-nodeport.md): kind via CLI, plataforma por Terraform, NodePort sem Ingress).
-- **Terraform** ([`infra/terraform`](infra/README.md)) cuida de tudo o que fica **dentro** do cluster: namespaces `revenda` e `identidade`, senhas aleatórias entregues como Secrets, os dois PostgreSQL (StatefulSet + PVC), Keycloak com o realm, NetworkPolicies dos bancos e metrics-server. O state fica fora do repositório, em `%USERPROFILE%\.revenda` ([ADR-011](docs/adrs/ADR-011-segredos-terraform.md)).
+- **Cluster kind** `revenda` criado pela **CLI `kind`** a partir de [`infra/kind/cluster.yaml`](infra/kind/cluster.yaml) (um nó, imagem fixada por digest, portas do host em `127.0.0.1`: 8080 → API, 8180 → Keycloak, 15432 → banco da API para demonstração). O cluster é a **plataforma local compartilhada** pelos dois repositórios: o `cluster.yaml` é idêntico nos dois, e o CD de cada um cria o cluster se ele faltar. O plano original usava o provider Terraform `tehcyx/kind`, mas o binário dele não tem assinatura de código e foi bloqueado pelo **Smart App Control** do Windows 11; a CLI `kind` é assinada ([ADR-005](docs/adrs/ADR-005-kind-terraform-nodeport.md): kind via CLI, plataforma por Terraform, NodePort sem Ingress).
+- **Terraform** ([`infra/terraform`](infra/README.md)) cuida do que é da API **dentro** do cluster: namespace `revenda`, senhas aleatórias entregues como Secrets (`revenda-db-credentials`, `revenda-webhook-secret`), o PostgreSQL `revenda-db` (StatefulSet + PVC), a NetworkPolicy do banco e o metrics-server. O state fica fora do repositório, em `%USERPROFILE%\.revenda\revenda-api.tfstate` ([ADR-011](docs/adrs/ADR-011-segredos-terraform.md)). O namespace `identidade` (Keycloak, banco do Keycloak, segredos dele) é do repositório de identidade, com o state `%USERPROFILE%\.revenda\identidade.tfstate` ([ADR-014](docs/adrs/ADR-014-identidade-em-repositorio-proprio.md)).
 - **Aplicação** por kustomize ([`k8s/`](k8s/README.md)): Deployment `revenda-api` (não root, sistema de arquivos somente leitura, probes), Service NodePort 30080, HPA 2..5 réplicas e Job de migração Alembic executado antes de cada rollout. A imagem `revenda-api:<sha>` é carregada no nó com `kind load`, sem registry ([ADR-010](docs/adrs/ADR-010-kind-load-sem-registry.md)).
 
 ### 2.9 CI/CD
@@ -153,10 +163,10 @@ Tudo roda no PC do autor (Windows 11, Docker Desktop), sem nuvem:
 | Etapa | Onde | O que faz |
 |---|---|---|
 | Pull Request | GitHub | `main` protegida: PR obrigatório, 4 checks obrigatórios, branch atualizada, histórico linear, sem force push, regras valendo também para administradores, só squash merge |
-| CI ([`ci.yml`](.github/workflows/ci.yml)) | Runner hospedado (`ubuntu-latest`), em todo PR e push na `main` | `qualidade`: ruff (lint e formato), mypy, import-linter. `testes`: unit + integração contra PostgreSQL de serviço, cobertura mínima de 80%. `imagem`: build da imagem, Trivy (vulnerabilidades CRITICAL/HIGH corrigíveis) e varredura de segredos. `infra`: `terraform fmt`/`validate`, kubeconform nos manifestos, validação do `cluster.yaml`, hadolint e shellcheck do runner, contrato mínimo do realm. Um quinto job, `titulo-pr`, valida o título no padrão Conventional Commits (não é obrigatório na proteção) |
-| CD ([`cd.yml`](.github/workflows/cd.yml)) | Runner **self-hosted** num **container Linux** no Docker Desktop (labels `self-hosted`, `Linux`, `kind-local`), só em push na `main` (PR mergeado) ou disparo manual com `ref` ancestral da `main` (outra `ref` é recusada) | Cria o cluster kind se faltar; `terraform apply`; build `revenda-api:<sha>`; `kind load`; Job de migração; rollout do Deployment; aguarda API e Keycloak; **testes e2e** contra o ambiente implantado; resumo no job summary |
+| CI ([`ci.yml`](.github/workflows/ci.yml)) | Runner hospedado (`ubuntu-latest`), em todo PR e push na `main` | `qualidade`: ruff (lint e formato), mypy, import-linter. `testes`: unit + integração contra PostgreSQL de serviço, cobertura mínima de 80%. `imagem`: build da imagem, Trivy (vulnerabilidades CRITICAL/HIGH corrigíveis) e varredura de segredos. `infra`: `terraform fmt`/`validate`, kubeconform nos manifestos, validação do `cluster.yaml`, hadolint e shellcheck do runner (o contrato do realm é testado no CI do repositório de identidade). Um quinto job, `titulo-pr`, valida o título no padrão Conventional Commits (não é obrigatório na proteção) |
+| CD ([`cd.yml`](.github/workflows/cd.yml)) | Runner **self-hosted** num **container Linux** no Docker Desktop (labels `self-hosted`, `Linux`, `kind-local`), só em push na `main` (PR mergeado) ou disparo manual com `ref` ancestral da `main` (outra `ref` é recusada) | Cria o cluster kind se faltar; **confere que o realm `revenda` responde** (sem ele, falha cedo pedindo para implantar a identidade); `terraform apply` (state `revenda-api.tfstate`); build `revenda-api:<sha>`; `kind load`; Job de migração; rollout do Deployment; aguarda a API; **testes e2e** contra o ambiente implantado; resumo no job summary |
 
-O runner roda em container porque o runner nativo para Windows também foi bloqueado pelo Smart App Control. O container fica na rede docker `kind` e compartilha o state do Terraform com os scripts do Windows por bind mount ([ADR-006](docs/adrs/ADR-006-ci-hospedado-cd-self-hosted.md), [docs/08](docs/08-ci-cd-infra.md)). O primeiro deploy automático passou com os 18 testes e2e verdes. Rollback: *Actions > CD > Run workflow* com `ref` = SHA anterior da `main`; o Job de migração da versão anterior reconhece o schema mais novo e não o altera ([docs/08, seção 6](docs/08-ci-cd-infra.md#6-rollback)).
+O serviço de identidade tem CI e CD próprios, no repositório dele; o CD da API não implanta nem altera o Keycloak, só consome o contrato (o realm publicado e os Secrets de contrato `keycloak-gestor` e `keycloak-e2e`). O runner roda em container porque o runner nativo para Windows também foi bloqueado pelo Smart App Control. O container fica na rede docker `kind` e compartilha o state do Terraform com os scripts do Windows por bind mount ([ADR-006](docs/adrs/ADR-006-ci-hospedado-cd-self-hosted.md), [docs/08](docs/08-ci-cd-infra.md)). O primeiro deploy automático passou com os 18 testes e2e verdes. Rollback: *Actions > CD > Run workflow* com `ref` = SHA anterior da `main`; o Job de migração da versão anterior reconhece o schema mais novo e não o altera ([docs/08, seção 6](docs/08-ci-cd-infra.md#6-rollback)).
 
 ### 2.10 Observabilidade
 
@@ -181,7 +191,7 @@ Logs JSON em stdout com `X-Request-ID` e sem dados pessoais; probes de vida e pr
 | [13 — Design Approval Sheet](docs/13-das.md) | Folha de aprovação do desenho: escopo, decisões, qualidade, riscos, custos |
 | [infra/README.md](infra/README.md) | Detalhes da plataforma (kind, Terraform, runner) |
 | [k8s/README.md](k8s/README.md) | Manifestos da aplicação e contrato com o CD |
-| [keycloak/README.md](keycloak/README.md) | Configuração do realm |
+| [Repositório de identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade) | Configuração do realm (`README.md`) e contrato publicado para a API (`docs/contrato-identidade.md`) |
 
 | ADR | Decisão |
 |---|---|
@@ -198,43 +208,62 @@ Logs JSON em stdout com `X-Request-ID` e sem dados pessoais; probes de vida e pr
 | [ADR-011](docs/adrs/ADR-011-segredos-terraform.md) | Segredos gerados pelo Terraform, nada sensível versionado |
 | [ADR-012](docs/adrs/ADR-012-observabilidade-prometheus.md) | Métricas Prometheus nativas na API, APM como evolução |
 | [ADR-013](docs/adrs/ADR-013-sem-api-gateway-e-serverless.md) | Sem API Gateway e sem Serverless nesta entrega |
+| [ADR-014](docs/adrs/ADR-014-identidade-em-repositorio-proprio.md) | Serviço de identidade em repositório próprio, com pipeline, Terraform e state separados |
 
 ---
 
 ## 3. Como usar localmente
 
-Há duas formas. As duas publicam a API em `http://localhost:8080` e o Keycloak em `http://localhost:8180`, portanto **não rode as duas ao mesmo tempo**.
+O serviço de identidade é **pré-requisito** da API e vem do [repositório de identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade). Clone os dois repositórios lado a lado:
+
+```bash
+git clone https://github.com/Caina-Climaco/fiap-soat-revenda-identidade.git
+git clone https://github.com/Caina-Climaco/fiap-soat-revenda-veiculos.git
+```
+
+Há duas formas de rodar. As duas publicam a API em `http://localhost:8080` e o Keycloak em `http://localhost:8180`, portanto **não rode as duas ao mesmo tempo**.
 
 | | Opção A — docker compose | Opção B — ambiente completo (kind) |
 |---|---|---|
 | Para quê | Desenvolvimento rápido | Mesmo ambiente do CD |
 | Requer | Docker | Windows, Docker Desktop, kind, Terraform, kubectl, gh |
-| Segredos | Você define no `.env` | Gerados pelo Terraform, lidos com `kubectl` |
+| Ordem | compose da identidade → compose da API | identidade (script 04 ou CD de lá) → script 04 daqui → CD da API |
+| Segredos | Você define nos dois `.env` | Gerados pelo Terraform de cada repositório, lidos com `kubectl` |
 
 ### 3.1 Opção A — docker compose (desenvolvimento)
 
+Primeiro o serviço de identidade, no repositório dele (detalhes no `README.md` de lá):
+
 ```bash
+cd fiap-soat-revenda-identidade
+cp .env.example .env      # troque os valores; GESTOR_PASSWORD é a senha do gestor.loja
+docker compose up -d      # Keycloak em http://localhost:8180, realm revenda importado
+```
+
+Depois a API, neste repositório:
+
+```bash
+cd fiap-soat-revenda-veiculos
 cp .env.example .env      # PowerShell: Copy-Item .env.example .env
 # edite o .env e troque todos os valores "troque-..." (o .env é ignorado pelo Git)
 docker compose up -d --build
-docker compose ps         # aguarde api e keycloak como "healthy"
+docker compose ps         # aguarde a api como "healthy"
 ```
 
-O compose sobe o banco da API, o Job de migração (`alembic upgrade head`), a API, o Keycloak e o banco do Keycloak, em redes separadas. O realm `revenda` é importado só na primeira subida; para recomeçar do zero, `docker compose down -v`.
+O compose da API sobe só o banco da API, o Job de migração (`alembic upgrade head`) e a API; não há Keycloak nele. A API valida o `iss` `http://localhost:8180/realms/revenda` e busca as chaves (JWKS) do Keycloak pelo host, em `http://host.docker.internal:8180` (o compose declara `host.docker.internal` via `host-gateway`, para funcionar também no Linux). Para recomeçar do zero, `docker compose down -v` em cada repositório.
 
 | Serviço | URL |
 |---|---|
 | API | http://localhost:8080 |
 | Swagger UI | http://localhost:8080/docs |
 | Métricas Prometheus | http://localhost:8080/metrics |
-| Keycloak (console admin, realm `master`) | http://localhost:8180/admin/ — usuário e senha: `KC_BOOTSTRAP_ADMIN_USERNAME` e `KC_BOOTSTRAP_ADMIN_PASSWORD` do `.env` |
-| Conta do cliente | http://localhost:8180/realms/revenda/account |
 | PostgreSQL da API | `localhost:5432` (usuário `DB_USER`, senha `DB_PASSWORD` do `.env`) |
+| Keycloak e conta do cliente (repositório de identidade) | http://localhost:8180, http://localhost:8180/realms/revenda/account |
 
 Token: pelo Swagger (passo a passo na [seção 3.3](#33-passo-a-passo-de-uso-pelo-swagger)) ou, para scripts, pelo client `revenda-e2e` (password grant, só local). Exemplo com o gestor, em bash:
 
 ```bash
-GESTOR_PASSWORD='<valor de GESTOR_PASSWORD no .env>'
+GESTOR_PASSWORD='<valor de GESTOR_PASSWORD no .env do repositório de identidade>'
 TOKEN=$(curl -s http://localhost:8180/realms/revenda/protocol/openid-connect/token \
   -d grant_type=password -d client_id=revenda-e2e -d username=gestor.loja \
   --data-urlencode "password=$GESTOR_PASSWORD" | jq -r .access_token)
@@ -245,20 +274,26 @@ curl -s http://localhost:8080/api/v1/vendas -H "Authorization: Bearer $TOKEN"
 
 **Pré-requisitos**: Windows 10/11, Docker Desktop (com o `kubectl` que ele instala), kind, Terraform, gh (autenticado com `gh auth login`) e git. O script 01 instala kind, Terraform e Helm via winget. Portas livres: 8080, 8180 e 15432.
 
-Rode na raiz do repositório, em PowerShell normal (sem administrador), um script por vez:
+**Ordem para subir tudo do zero:**
+
+1. **Identidade** — no repositório de identidade, `scripts\windows\04-subir-ambiente.ps1` (ou o CD de lá): cria o cluster kind `revenda`, se faltar, e implanta o namespace `identidade` (Keycloak, banco, segredos, realm). Veja o `README.md` daquele repositório.
+2. **Infraestrutura da API** — neste repositório, `scripts\windows\04-subir-ambiente.ps1`: namespace `revenda`, segredos, `revenda-db` e metrics-server. O script **exige** o realm respondendo em `http://localhost:8180` e falha com uma mensagem clara se a identidade não estiver no ar.
+3. **API** — pelo CD deste repositório (merge na `main` ou disparo manual).
+
+Rode os scripts na raiz deste repositório, em PowerShell normal (sem administrador), um por vez:
 
 | # | Script | O que faz | Quando |
 |---|---|---|---|
 | 00 | `scripts\windows\00-verificar-ambiente.ps1` | Relatório de ferramentas, versões, Docker, clusters kind, `gh auth` e portas em uso (`.setup\relatorio-ambiente.txt`) | Sempre, para conferir |
 | 01 | `scripts\windows\01-instalar-ferramentas.ps1` | Instala o que falta (kind, Terraform, Helm) e inicia o Docker Desktop | Primeira vez |
 | 02 | `scripts\windows\02-criar-repositorio.ps1` | Cria o repositório no GitHub, faz o push, aplica a proteção da `main` (4 checks, PR obrigatório, squash, histórico linear), aprovação para workflows de forks e o environment `local` | Uma vez, pelo dono do repositório (num fork: `-Dono <seu-usuario>`) |
-| 03 | `scripts\windows\03-instalar-runner.ps1` | Constrói a imagem do runner (`infra/runner`) e sobe o container `revenda-runner` na rede `kind`, registrado com a label `kind-local`; `-Remover` desfaz | Uma vez, depois do 04 (precisa do cluster e da rede `kind`) |
-| 04 | `scripts\windows\04-subir-ambiente.ps1` | Cria o cluster kind (se faltar) e roda `terraform init` + `apply` com o mesmo state do CD; mostra pods, URLs e como ler os segredos. `-Recriar` apaga cluster e state antes; `-SemBancoExposto` não publica o banco em 15432 | Para subir a plataforma |
-| 05 | `scripts\windows\05-destruir-ambiente.ps1` | `terraform destroy`, `kind delete cluster` e remoção do state (pede confirmação; `-Forcar` não pede) | Para apagar tudo |
+| 03 | `scripts\windows\03-instalar-runner.ps1` | Constrói a imagem do runner (`infra/runner`) e sobe o container `revenda-runner` na rede `kind`, registrado **neste** repositório com a label `kind-local`; `-Remover` desfaz. A identidade tem o próprio runner (`revenda-runner-identidade`), instalado pelo script 03 de lá | Uma vez, depois do 04 (precisa do cluster e da rede `kind`) |
+| 04 | `scripts\windows\04-subir-ambiente.ps1` | Cria o cluster kind (se faltar), exige o realm `revenda` em `localhost:8180` e roda `terraform init` + `apply` com o mesmo state do CD (`%USERPROFILE%\.revenda\revenda-api.tfstate`); mostra pods, URLs e como ler os segredos. `-SemBancoExposto` não publica o banco em 15432. Avisa se ainda existir o state antigo `terraform.tfstate` ([seção 8](#8-migração-para-dois-repositórios)) | Para subir a infraestrutura da API |
+| 05 | `scripts\windows\05-destruir-ambiente.ps1` | `terraform destroy` só do que é da API (namespace `revenda`) e remoção do state dela; a identidade não é tocada. `-ApagarCluster` também apaga o cluster kind inteiro (derruba a identidade junto). Pede confirmação; `-Forcar` não pede | Para apagar a API |
 
 Exemplo: `powershell -ExecutionPolicy Bypass -File .\scripts\windows\04-subir-ambiente.ps1`.
 
-Ordem na primeira vez: **00 → 01 → 02 → 04 → 03**, e então implantar a aplicação. O script 04 sobe a plataforma (bancos e Keycloak); a **API vem do CD**: faça merge de um PR na `main` ou dispare o workflow manualmente:
+Ordem na primeira vez, neste repositório: **00 → 01 → 02 → (identidade no ar) → 04 → 03**, e então implantar a aplicação. O script 04 sobe a infraestrutura da API; a **API vem do CD**: faça merge de um PR na `main` ou dispare o workflow manualmente:
 
 ```powershell
 gh workflow run cd.yml -R Caina-Climaco/fiap-soat-revenda-veiculos
@@ -285,15 +320,14 @@ kubectl -n revenda rollout status deployment/revenda-api --timeout=180s
 
 </details>
 
-**Segredos.** Todos são gerados pelo Terraform (`random_password`) e ficam apenas no state local e em Secrets do cluster; nenhum está no repositório.
+**Segredos.** Todos são gerados pelo Terraform (`random_password`) e ficam apenas no state local e em Secrets do cluster; nenhum está no repositório. Os do namespace `revenda` são deste repositório; os do namespace `identidade` são do repositório de identidade, e a API usa deles só os **Secrets de contrato** abaixo (o admin do realm `master` nunca sai daquele repositório).
 
-| Secret (namespace/nome) | Chaves | Para quê |
-|---|---|---|
-| `identidade/keycloak-gestor` | `GESTOR_PASSWORD` | Senha do usuário `gestor.loja` |
-| `identidade/keycloak-admin` | `KC_BOOTSTRAP_ADMIN_USERNAME`, `KC_BOOTSTRAP_ADMIN_PASSWORD` | Console admin do Keycloak (realm `master`; usuário `admin`) |
-| `revenda/revenda-webhook-secret` | `WEBHOOK_SECRET` | Header `X-Webhook-Secret` do gateway simulado |
-| `revenda/revenda-db-credentials` | `DB_USER`, `DB_PASSWORD`, `DB_NAME` | Banco da API (`revenda`/`revenda`) |
-| `identidade/keycloak-db-credentials` | `KC_DB_USERNAME`, `KC_DB_PASSWORD` | Banco do Keycloak (não exposto no host) |
+| Secret (namespace/nome) | Chaves | Para quê | Repositório |
+|---|---|---|---|
+| `revenda/revenda-webhook-secret` | `WEBHOOK_SECRET` | Header `X-Webhook-Secret` do gateway simulado | este |
+| `revenda/revenda-db-credentials` | `DB_USER`, `DB_PASSWORD`, `DB_NAME` | Banco da API (`revenda`/`revenda`) | este |
+| `identidade/keycloak-gestor` | `GESTOR_PASSWORD` | Senha do usuário `gestor.loja` (login e e2e) | identidade |
+| `identidade/keycloak-e2e` | `E2E_ADMIN_CLIENT_ID`, `E2E_ADMIN_CLIENT_SECRET` | Client técnico `revenda-e2e-admin` dos testes e2e (só gerencia usuários do realm `revenda`) | identidade |
 
 PowerShell:
 
@@ -303,7 +337,7 @@ function Segredo([string]$ns, [string]$nome, [string]$chave) {
   [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b64))
 }
 Segredo identidade keycloak-gestor GESTOR_PASSWORD
-Segredo identidade keycloak-admin KC_BOOTSTRAP_ADMIN_PASSWORD
+Segredo identidade keycloak-e2e E2E_ADMIN_CLIENT_SECRET
 Segredo revenda revenda-webhook-secret WEBHOOK_SECRET
 Segredo revenda revenda-db-credentials DB_PASSWORD
 # copiar sem mostrar na tela: Segredo revenda revenda-webhook-secret WEBHOOK_SECRET | Set-Clipboard
@@ -314,7 +348,7 @@ bash (Git Bash ou Linux):
 ```bash
 segredo() { kubectl -n "$1" get secret "$2" -o jsonpath="{.data.$3}" | base64 -d; }
 segredo identidade keycloak-gestor GESTOR_PASSWORD
-segredo identidade keycloak-admin KC_BOOTSTRAP_ADMIN_PASSWORD
+segredo identidade keycloak-e2e E2E_ADMIN_CLIENT_SECRET
 segredo revenda revenda-webhook-secret WEBHOOK_SECRET
 segredo revenda revenda-db-credentials DB_PASSWORD
 ```
@@ -326,12 +360,11 @@ segredo revenda revenda-db-credentials DB_PASSWORD
 | API | http://localhost:8080 |
 | Swagger UI | http://localhost:8080/docs (OpenAPI em `/openapi.json`) |
 | Métricas Prometheus | http://localhost:8080/metrics |
-| Keycloak | http://localhost:8180 |
-| Console admin do Keycloak | http://localhost:8180/admin/ (usuário `admin`, senha `KC_BOOTSTRAP_ADMIN_PASSWORD`) |
+| Keycloak (repositório de identidade) | http://localhost:8180 |
 | Conta do cliente (dados do titular) | http://localhost:8180/realms/revenda/account |
 | Banco da API (demonstração) | `localhost:15432`, usuário `revenda`, banco `revenda`, senha `DB_PASSWORD`; por exemplo `psql -h localhost -p 15432 -U revenda -d revenda`, ou sem psql instalado: `kubectl -n revenda exec -it statefulset/revenda-db -- psql -U revenda -d revenda` |
 
-Outros comandos úteis: `kubectl get pods -A`, `kubectl -n revenda get hpa revenda-api`, `kubectl -n identidade logs deployment/keycloak --tail=100`.
+Outros comandos úteis: `kubectl get pods -A`, `kubectl -n revenda get hpa revenda-api`. O console admin do Keycloak e os logs dele estão documentados no repositório de identidade.
 
 ### 3.3 Passo a passo de uso pelo Swagger
 
@@ -360,7 +393,7 @@ Dica: o Keycloak mantém a sessão no navegador. Para alternar entre gestor e cl
 <details>
 <summary>O mesmo fluxo com curl (bash, requer curl e jq)</summary>
 
-Funciona com as duas opções. Na opção A, use os valores do `.env` em vez de `kubectl`. O cliente é criado pela Admin API do Keycloak, como fazem os testes e2e (equivale ao autocadastro: recebe o papel `cliente`).
+Funciona com as duas opções. Na opção A, use os valores do `.env` dos dois repositórios em vez de `kubectl` (`E2E_ADMIN_CLIENT_SECRET` está no `.env` do repositório de identidade). O cliente é criado pela Admin API do Keycloak com o client técnico `revenda-e2e-admin`, como fazem os testes e2e (equivale ao autocadastro: recebe o papel `cliente`).
 
 ```bash
 API=http://localhost:8080
@@ -368,8 +401,8 @@ KC=http://localhost:8180
 segredo() { kubectl -n "$1" get secret "$2" -o jsonpath="{.data.$3}" | base64 -d; }
 GESTOR_PASSWORD=$(segredo identidade keycloak-gestor GESTOR_PASSWORD)
 WEBHOOK_SECRET=$(segredo revenda revenda-webhook-secret WEBHOOK_SECRET)
-KC_ADMIN_USER=$(segredo identidade keycloak-admin KC_BOOTSTRAP_ADMIN_USERNAME)
-KC_ADMIN_PASSWORD=$(segredo identidade keycloak-admin KC_BOOTSTRAP_ADMIN_PASSWORD)
+KC_CLIENT_ID=$(segredo identidade keycloak-e2e E2E_ADMIN_CLIENT_ID)          # revenda-e2e-admin
+KC_CLIENT_SECRET=$(segredo identidade keycloak-e2e E2E_ADMIN_CLIENT_SECRET)
 
 token() {  # token(usuario, senha) pelo client revenda-e2e (somente ambiente local)
   curl -s "$KC/realms/revenda/protocol/openid-connect/token" \
@@ -385,11 +418,12 @@ VEICULO=$(curl -s -X POST "$API/api/v1/veiculos" -H "Authorization: Bearer $TG" 
 curl -s -X PATCH "$API/api/v1/veiculos/$VEICULO" -H "Authorization: Bearer $TG" \
   -H "Content-Type: application/json" -d '{"preco":"77900.00"}' | jq
 
-# 2. Cliente: cadastro pela Admin API do Keycloak (ou pela tela de registro)
+# 2. Cliente: cadastro pela Admin API do Keycloak (ou pela tela de registro), com o token
+#    do client técnico revenda-e2e-admin (client credentials no realm revenda; só gerencia usuários)
 #    Dados fictícios: o CPF 12345678901 tem só o formato válido (11 dígitos), não os dígitos verificadores
-TA=$(curl -s "$KC/realms/master/protocol/openid-connect/token" \
-  -d grant_type=password -d client_id=admin-cli -d "username=$KC_ADMIN_USER" \
-  --data-urlencode "password=$KC_ADMIN_PASSWORD" | jq -r .access_token)
+TA=$(curl -s "$KC/realms/revenda/protocol/openid-connect/token" \
+  -d grant_type=client_credentials -d "client_id=$KC_CLIENT_ID" \
+  --data-urlencode "client_secret=$KC_CLIENT_SECRET" | jq -r .access_token)
 curl -s -o /dev/null -w "cadastro: %{http_code}\n" -X POST "$KC/admin/realms/revenda/users" \
   -H "Authorization: Bearer $TA" -H "Content-Type: application/json" \
   -d '{"username":"maria.silva","email":"maria@example.com","emailVerified":true,"enabled":true,
@@ -455,7 +489,7 @@ uv run lint-imports      # camadas por módulo, independência Catálogo x Venda
 
 ### 4.3 Ponta a ponta (e2e) contra o ambiente implantado
 
-Os testes em `tests/e2e` exercitam o fluxo completo contra a API e o Keycloak reais: criam clientes pela Admin API, obtêm tokens pelo client `revenda-e2e`, compram, efetivam, testam 401/403/404/409 e removem os usuários de teste ao final. Os veículos que criam (modelos com "E2E") ficam no catálogo. Variáveis:
+Os testes em `tests/e2e` exercitam o fluxo completo contra a API e o Keycloak reais (este implantado pelo repositório de identidade): criam clientes pela Admin API do realm `revenda` com o client técnico `revenda-e2e-admin` (client credentials; nunca o admin do realm `master`), obtêm tokens pelo client `revenda-e2e`, compram, efetivam, testam 401/403/404/409 e removem os usuários de teste ao final. Os veículos que criam (modelos com "E2E") ficam no catálogo. Variáveis:
 
 | Variável | Obrigatória | Valor |
 |---|---|---|
@@ -463,8 +497,8 @@ Os testes em `tests/e2e` exercitam o fluxo completo contra a API e o Keycloak re
 | `E2E_KEYCLOAK_URL` | não | Padrão `http://localhost:8180` |
 | `E2E_GESTOR_PASSWORD` | sim | `identidade/keycloak-gestor` → `GESTOR_PASSWORD` |
 | `E2E_WEBHOOK_SECRET` | sim | `revenda/revenda-webhook-secret` → `WEBHOOK_SECRET` |
-| `E2E_KC_ADMIN_USER` | sim | `identidade/keycloak-admin` → `KC_BOOTSTRAP_ADMIN_USERNAME` |
-| `E2E_KC_ADMIN_PASSWORD` | sim | `identidade/keycloak-admin` → `KC_BOOTSTRAP_ADMIN_PASSWORD` |
+| `E2E_KC_CLIENT_SECRET` | sim | `identidade/keycloak-e2e` → `E2E_ADMIN_CLIENT_SECRET` |
+| `E2E_KC_CLIENT_ID` | não | Padrão `revenda-e2e-admin` (`identidade/keycloak-e2e` → `E2E_ADMIN_CLIENT_ID`) |
 | `E2E_EXIGIR` | não | `1` transforma variável ausente em erro (usado no CD); sem ela, os testes são pulados |
 
 bash:
@@ -473,8 +507,7 @@ bash:
 segredo() { kubectl -n "$1" get secret "$2" -o jsonpath="{.data.$3}" | base64 -d; }
 export E2E_GESTOR_PASSWORD="$(segredo identidade keycloak-gestor GESTOR_PASSWORD)"
 export E2E_WEBHOOK_SECRET="$(segredo revenda revenda-webhook-secret WEBHOOK_SECRET)"
-export E2E_KC_ADMIN_USER="$(segredo identidade keycloak-admin KC_BOOTSTRAP_ADMIN_USERNAME)"
-export E2E_KC_ADMIN_PASSWORD="$(segredo identidade keycloak-admin KC_BOOTSTRAP_ADMIN_PASSWORD)"
+export E2E_KC_CLIENT_SECRET="$(segredo identidade keycloak-e2e E2E_ADMIN_CLIENT_SECRET)"
 uv run pytest tests/e2e -m e2e -p no:cacheprovider -o addopts="" -v
 ```
 
@@ -483,12 +516,11 @@ PowerShell (com a função `Segredo` da [seção 3.2](#32-opção-b--ambiente-co
 ```powershell
 $env:E2E_GESTOR_PASSWORD   = Segredo identidade keycloak-gestor GESTOR_PASSWORD
 $env:E2E_WEBHOOK_SECRET    = Segredo revenda revenda-webhook-secret WEBHOOK_SECRET
-$env:E2E_KC_ADMIN_USER     = Segredo identidade keycloak-admin KC_BOOTSTRAP_ADMIN_USERNAME
-$env:E2E_KC_ADMIN_PASSWORD = Segredo identidade keycloak-admin KC_BOOTSTRAP_ADMIN_PASSWORD
+$env:E2E_KC_CLIENT_SECRET  = Segredo identidade keycloak-e2e E2E_ADMIN_CLIENT_SECRET
 uv run pytest tests/e2e -m e2e -p no:cacheprovider -o addopts="" -v
 ```
 
-O `tests/e2e/pytest.ini` isola o e2e da configuração do `pyproject.toml`; o e2e depende apenas de `pytest` e `httpx` (`tests/e2e/requirements.txt`) e não importa o pacote `revenda`. Na opção A, o mesmo comando funciona com os valores do `.env` (`E2E_KC_ADMIN_USER` = `KC_BOOTSTRAP_ADMIN_USERNAME`).
+O `tests/e2e/pytest.ini` isola o e2e da configuração do `pyproject.toml`; o e2e depende apenas de `pytest` e `httpx` (`tests/e2e/requirements.txt`) e não importa o pacote `revenda`. Na opção A, o mesmo comando funciona com os valores do `.env` do repositório de identidade (`E2E_GESTOR_PASSWORD` = `GESTOR_PASSWORD`, `E2E_KC_CLIENT_SECRET` = `E2E_ADMIN_CLIENT_SECRET`) e do `.env` deste (`E2E_WEBHOOK_SECRET` = `WEBHOOK_SECRET`).
 
 ### 4.4 Carga (k6) e métricas
 
@@ -509,8 +541,8 @@ curl -s http://localhost:8080/metrics | grep '^revenda_'
 | CI, job `qualidade` | `ruff check`, `ruff format --check`, `mypy src`, `lint-imports` |
 | CI, job `testes` | `pytest -m "unit or integration"` com cobertura de ramos e `--cov-fail-under=80`, contra o *service container* `postgres:16-alpine`; publica o `coverage.xml` como artefato |
 | CI, job `imagem` | Build da imagem; Trivy na imagem (CRITICAL/HIGH corrigíveis) e varredura de segredos no repositório |
-| CI, job `infra` | `terraform fmt -check`, `terraform validate`, kubeconform em `k8s/base` e `k8s/migracao`, validação do `infra/kind/cluster.yaml`, hadolint e shellcheck do runner, contrato mínimo do realm |
-| CD, job `deploy` | Após o rollout: espera `/health/ready` e o discovery do Keycloak; roda `pytest tests/e2e -m e2e` com `E2E_EXIGIR=1`; o resultado e a contagem de testes vão para o job summary |
+| CI, job `infra` | `terraform fmt -check`, `terraform validate`, kubeconform em `k8s/base` e `k8s/migracao`, validação do `infra/kind/cluster.yaml`, hadolint e shellcheck do runner (o realm é validado no CI do repositório de identidade, job `realm`) |
+| CD, job `deploy` | Antes de tudo, confere o discovery do realm `revenda` (pré-requisito); após o rollout, espera `/health/ready`; roda `pytest tests/e2e -m e2e` com `E2E_EXIGIR=1`; o resultado e a contagem de testes vão para o job summary |
 
 ### 4.6 Cobertura
 
@@ -545,10 +577,9 @@ O CI exige no mínimo **80%** de cobertura (linhas e ramos) em `src/revenda`. Co
 ├── tests/
 │   ├── unit/  integration/  e2e/  apoio/
 │   └── carga/             # teste de carga k6 (listagens.js)
-├── keycloak/              # realm-revenda.json
 ├── infra/
 │   ├── kind/cluster.yaml  # cluster kind (CLI kind)
-│   ├── terraform/         # conteúdo do cluster
+│   ├── terraform/         # namespace revenda (banco, segredos, NetworkPolicy, metrics-server)
 │   └── runner/            # imagem do runner self-hosted
 ├── k8s/
 │   ├── base/              # Deployment, Service, HPA, ConfigMap
@@ -563,15 +594,32 @@ O CI exige no mínimo **80%** de cobertura (linhas e ramos) em `src/revenda`. Co
 ## 7. Limitações conhecidas
 
 - **Pagamento simulado**: não há integração com provedor real; o gateway é representado por chamadas ao webhook com segredo compartilhado (sem assinatura HMAC do corpo, sem estorno).
+- **Dois repositórios, um cluster local**: identidade e API têm pipelines, Terraform e states separados, mas rodam no mesmo cluster kind e no mesmo PC; apagar o cluster (`-ApagarCluster`) derruba os dois. A API depende de a identidade estar no ar antes (o script 04 e o CD conferem).
 - **Ambiente local sem TLS**: API e Keycloak respondem em HTTP, só em `127.0.0.1`.
-- **Keycloak em `start-dev`**: adequado ao ambiente de demonstração, não a produção; o client `revenda-e2e` (password grant) existe só localmente.
+- **Keycloak em `start-dev`**: adequado ao ambiente de demonstração, não a produção; os clients `revenda-e2e` (password grant) e `revenda-e2e-admin` (gestão de usuários para os testes) existem só localmente.
 - **CPF sem unicidade garantida**: o Keycloak valida o formato, mas não impede o mesmo CPF em duas contas; o identificador único do cadastro é o e-mail.
-- **State local do Terraform**: fica em `%USERPROFILE%\.revenda`, sem backend remoto nem *locking*; contém os segredos em texto claro e por isso nunca vai para o repositório.
+- **State local do Terraform**: fica em `%USERPROFILE%\.revenda\revenda-api.tfstate` (o da identidade, em `identidade.tfstate`), sem backend remoto nem *locking*; contém os segredos em texto claro e por isso nunca vai para o repositório.
 - **Sem API Gateway nem rate limiting na borda**: a API é exposta direto por NodePort; os limites de paginação e as validações de entrada reduzem o risco de abuso ([ADR-013](docs/adrs/ADR-013-sem-api-gateway-e-serverless.md)).
 - **Métricas sem Prometheus instalado**: a API expõe `/metrics` e o pod tem as anotações de *scrape*, mas o cluster local não roda Prometheus, Grafana nem APM ([docs/12](docs/12-observabilidade.md)).
 - **CD depende do PC ligado**: o runner self-hosted roda no PC do autor; com ele desligado, o deploy fica na fila até o runner voltar (ou é disparado de novo com *Run workflow*).
 
-## 8. Autor
+## 8. Migração para dois repositórios
+
+Até esta mudança ([ADR-014](docs/adrs/ADR-014-identidade-em-repositorio-proprio.md)), este repositório implantava API e Keycloak com um único Terraform e um único state (`%USERPROFILE%\.revenda\terraform.tfstate`). Agora cada repositório tem o seu state (`revenda-api.tfstate` e `identidade.tfstate`), e o state antigo descreve recursos que passaram a ser de outro dono. Para migrar um ambiente criado antes da separação, recomece do zero (os dados dos bancos locais são perdidos):
+
+1. Apague o cluster: `kind delete cluster --name revenda`.
+2. Apague o state antigo e o diretório de dados do Terraform: `%USERPROFILE%\.revenda\terraform.tfstate`, `%USERPROFILE%\.revenda\terraform.tfstate.backup` e `%USERPROFILE%\.revenda\terraform-data`.
+   ```powershell
+   Remove-Item "$env:USERPROFILE\.revenda\terraform.tfstate*" -Force -ErrorAction SilentlyContinue
+   Remove-Item "$env:USERPROFILE\.revenda\terraform-data" -Recurse -Force -ErrorAction SilentlyContinue
+   ```
+3. Suba a identidade: `scripts\windows\04-subir-ambiente.ps1` no repositório de identidade (ou o CD de lá).
+4. Suba a API: `scripts\windows\04-subir-ambiente.ps1` neste repositório e depois o CD.
+5. Instale o runner da identidade (`scripts\windows\03-instalar-runner.ps1` no repositório de identidade, container `revenda-runner-identidade`). O runner deste repositório (`revenda-runner`) continua o mesmo.
+
+No modo docker compose, rode `docker compose down -v --remove-orphans` neste repositório (o `--remove-orphans` remove os containers do Keycloak e do banco dele que ficaram do compose anterior) e `docker volume rm revenda_keycloak-db` (volume antigo, que o compose atual não declara mais), apague do `.env` as variáveis `KC_*` e `GESTOR_PASSWORD` (agora no `.env` do repositório de identidade) e siga a [seção 3.1](#31-opção-a--docker-compose-desenvolvimento).
+
+## 9. Autor
 
 **Cainã Clímaco** — FIAP PósTech Software Architecture (SOAT), Trabalho Substitutivo do Tech Challenge, Fase 3.
 Repositório: https://github.com/Caina-Climaco/fiap-soat-revenda-veiculos

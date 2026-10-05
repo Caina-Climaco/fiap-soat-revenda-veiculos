@@ -1,9 +1,12 @@
 """Fixtures e apoio dos testes ponta a ponta (marcador ``e2e``).
 
 Os testes rodam contra o ambiente implantado (kind): API em ``E2E_API_URL`` e
-Keycloak em ``E2E_KEYCLOAK_URL``. Tokens sao obtidos do Keycloak real por password
-grant no client ``revenda-e2e`` (habilitado somente no ambiente local) e os clientes
-compradores sao criados pela Admin REST API do Keycloak, simulando o autocadastro.
+Keycloak em ``E2E_KEYCLOAK_URL`` (servico de identidade, outro repositorio). Tokens sao
+obtidos do Keycloak real por password grant no client ``revenda-e2e`` e os clientes
+compradores sao criados pela Admin REST API, simulando o autocadastro, com o client tecnico
+``revenda-e2e-admin`` (client credentials; so gerencia usuarios do realm ``revenda``). Os
+dois clients existem somente no ambiente local e fazem parte do contrato publicado pelo
+repositorio fiap-soat-revenda-identidade. O admin do realm master nunca e usado aqui.
 
 Dependencias: apenas ``pytest`` e ``httpx`` (``tests/e2e/requirements.txt``); este
 modulo nao importa o pacote ``revenda``.
@@ -17,8 +20,8 @@ E2E_API_URL                nao          Base da API (padrao http://localhost:808
 E2E_KEYCLOAK_URL           nao          Base do Keycloak (padrao http://localhost:8180)
 E2E_GESTOR_PASSWORD        sim          Senha do usuario seed ``gestor.loja``
 E2E_WEBHOOK_SECRET         sim          Valor do header ``X-Webhook-Secret``
-E2E_KC_ADMIN_USER          sim          Admin do Keycloak (realm master)
-E2E_KC_ADMIN_PASSWORD      sim          Senha do admin do Keycloak
+E2E_KC_CLIENT_SECRET       sim          Segredo do client ``revenda-e2e-admin``
+E2E_KC_CLIENT_ID           nao          Padrao ``revenda-e2e-admin``
 E2E_GESTOR_USERNAME        nao          Padrao ``gestor.loja``
 E2E_RESERVA_TTL_MINUTOS    nao          TTL esperado da reserva (padrao 30)
 E2E_EXIGIR                 nao          ``1`` transforma variavel ausente em erro (CD)
@@ -51,8 +54,7 @@ PROBLEMA_PREFIXO = "urn:revenda:problema:"
 VARIAVEIS_OBRIGATORIAS = (
     "E2E_GESTOR_PASSWORD",
     "E2E_WEBHOOK_SECRET",
-    "E2E_KC_ADMIN_USER",
-    "E2E_KC_ADMIN_PASSWORD",
+    "E2E_KC_CLIENT_SECRET",
 )
 TIMEOUT = httpx.Timeout(20.0, connect=5.0)
 
@@ -94,8 +96,8 @@ class Config:
     gestor_username: str
     gestor_password: str
     webhook_secret: str
-    kc_admin_user: str
-    kc_admin_password: str
+    kc_client_id: str
+    kc_client_secret: str
     reserva_ttl_minutos: int
 
     @classmethod
@@ -109,8 +111,8 @@ class Config:
             gestor_username=os.environ.get("E2E_GESTOR_USERNAME", "gestor.loja"),
             gestor_password=os.environ["E2E_GESTOR_PASSWORD"],
             webhook_secret=os.environ["E2E_WEBHOOK_SECRET"],
-            kc_admin_user=os.environ["E2E_KC_ADMIN_USER"],
-            kc_admin_password=os.environ["E2E_KC_ADMIN_PASSWORD"],
+            kc_client_id=os.environ.get("E2E_KC_CLIENT_ID", "revenda-e2e-admin"),
+            kc_client_secret=os.environ["E2E_KC_CLIENT_SECRET"],
             reserva_ttl_minutos=int(os.environ.get("E2E_RESERVA_TTL_MINUTOS", "30")),
         )
 
@@ -221,18 +223,19 @@ class Keycloak:
         return usuario._token.valor
 
     def _admin_headers(self) -> dict[str, str]:
-        # O token do realm master dura pouco (60 s por padrao): um novo a cada operacao.
+        # Client credentials do client tecnico (papeis manage-users/view-users/query-users
+        # do realm revenda): um token novo a cada operacao, sem cache.
         resposta = self.http.post(
-            self._token_url("master"),
+            self._token_url(REALM),
             data={
-                "grant_type": "password",
-                "client_id": "admin-cli",
-                "username": self.cfg.kc_admin_user,
-                "password": self.cfg.kc_admin_password,
+                "grant_type": "client_credentials",
+                "client_id": self.cfg.kc_client_id,
+                "client_secret": self.cfg.kc_client_secret,
             },
         )
         assert resposta.status_code == 200, (
-            f"falha ao obter token admin do Keycloak: {resposta.status_code} {resposta.text[:300]}"
+            f"falha ao obter token do client {self.cfg.kc_client_id}: "
+            f"{resposta.status_code} {resposta.text[:300]}"
         )
         return {"Authorization": f"Bearer {resposta.json()['access_token']}"}
 

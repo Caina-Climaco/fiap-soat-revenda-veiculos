@@ -204,7 +204,7 @@ Identificadores de domínio em português sem acento; termos técnicos podem fic
 
 | Contexto | Responsabilidade | Agregados / dados | Implementação |
 |---|---|---|---|
-| Identidade e Acesso | Cadastro de pessoas, login, emissão de tokens, papéis, direitos do titular | Usuários, credenciais, atributos pessoais (nome, e-mail, CPF, telefone) | Keycloak, realm `revenda`, namespace `identidade`, banco `keycloak` em instância própria |
+| Identidade e Acesso | Cadastro de pessoas, login, emissão de tokens, papéis, direitos do titular | Usuários, credenciais, atributos pessoais (nome, e-mail, CPF, telefone) | Keycloak, realm `revenda`, namespace `identidade`, banco `keycloak` em instância própria; repositório próprio ([fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade)) |
 | Catálogo | Estoque e anúncio de veículos | `Veiculo` | Módulo `catalogo`, schema `catalogo` do banco `revenda` |
 | Vendas | Processo de compra, reserva, efetivação e cancelamento | `Venda` | Módulo `vendas`, schema `vendas` do banco `revenda` |
 | Gateway de Pagamento | Cobrança do comprador e notificação do resultado | — | Externo, simulado (Swagger UI / `curl`) |
@@ -228,7 +228,7 @@ Legenda: **U** = upstream (fornece o modelo), **D** = downstream (consome o mode
 
 | Relação | Padrão | Explicação |
 |---|---|---|
-| Identidade → Catálogo e Vendas | **Open Host Service / Published Language** (upstream) e **Conformista** (downstream) | O Keycloak expõe um protocolo público e padronizado (OpenID Connect) e uma linguagem publicada (JWT com claims `sub`, `iss`, `aud`/`azp`, `realm_access.roles`). Catálogo e Vendas se conformam a esse modelo sem traduzi-lo: usam `sub` como identificador do comprador e os papéis `cliente`/`gestor` diretamente. Não há chamada síncrona da API ao Keycloak além da obtenção do JWKS (com cache). |
+| Identidade → Catálogo e Vendas | **Open Host Service / Published Language** (upstream) e **Conformista** (downstream) | O Keycloak expõe um protocolo público e padronizado (OpenID Connect) e uma linguagem publicada (JWT com claims `sub`, `iss`, `aud`/`azp`, `realm_access.roles`). Catálogo e Vendas se conformam a esse modelo sem traduzi-lo: usam `sub` como identificador do comprador e os papéis `cliente`/`gestor` diretamente. Não há chamada síncrona da API ao Keycloak além da obtenção do JWKS (com cache). A linguagem publicada é o contrato documentado no repositório de identidade (`docs/contrato-identidade.md`), que tem ciclo de entrega próprio ([ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md)). |
 | Catálogo → Vendas | **Cliente-Fornecedor** | Vendas (cliente, downstream) depende de operações do Catálogo (fornecedor, upstream): `reservar`, `liberar`, `marcar_vendido` e consulta de dados do veículo. O contrato é a porta `CatalogoPort`, definida pelas necessidades de Vendas e implementada por um adaptador do módulo Catálogo, chamado em processo e na mesma transação. Vendas nunca acessa a tabela `catalogo.veiculos` diretamente. |
 | Gateway → Vendas | **Anticorruption Layer (ACL)** | O payload do gateway (`codigo_pagamento`, `status` `APROVADO`/`RECUSADO`) é traduzido no endpoint de webhook para comandos do domínio (`efetivar` ou `cancelar(PAGAMENTO_RECUSADO)`). O vocabulário do gateway não entra no agregado `Venda`; trocar de gateway exige apenas um novo adaptador. |
 

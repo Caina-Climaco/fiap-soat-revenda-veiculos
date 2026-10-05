@@ -1,6 +1,7 @@
 # ADR-011: Segredos gerados pelo Terraform, nada sensível versionado
 
 **Status:** Aceito
+**Atualizado por:** [ADR-014](ADR-014-identidade-em-repositorio-proprio.md)
 **Data:** 2026-10-03
 
 ## Contexto
@@ -39,3 +40,12 @@ Na fase anterior, foram commitados no repositório um `k8s/secret.yaml` com cred
 
 ## Mitigações
 - O state fica fora do repositório, num diretório do usuário do runner. Para produção, o caminho documentado é backend remoto criptografado e cofre de segredos.
+
+## Atualização (ADR-014, 2026-10-04)
+
+Atualizado por [ADR-014](ADR-014-identidade-em-repositorio-proprio.md). O mecanismo (Terraform gera, Secrets entregam, nada versionado) continua igual, mas os segredos foram divididos entre os repositórios:
+
+- **Este repositório** gera só os segredos da API: `revenda-db-credentials` e `revenda-webhook-secret` (namespace `revenda`), no state `revenda-api.tfstate`.
+- O repositório [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade) gera os segredos da identidade (`keycloak-db-credentials`, `keycloak-admin`, `keycloak-gestor`, `keycloak-e2e`), no state `identidade.tfstate`. Com isso, o state da API não contém mais a senha do admin do Keycloak nem a do banco com os dados pessoais.
+- A API consome, no e2e, apenas os Secrets de contrato `keycloak-gestor` (`GESTOR_PASSWORD`) e `keycloak-e2e` (`E2E_ADMIN_CLIENT_ID`, `E2E_ADMIN_CLIENT_SECRET`); o `keycloak-admin` nunca sai do repositório de identidade.
+- O `.env.example` da API não tem mais variáveis do Keycloak; elas estão no `.env.example` do repositório de identidade.

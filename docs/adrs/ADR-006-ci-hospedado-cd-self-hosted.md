@@ -1,6 +1,7 @@
 # ADR-006: CI no runner hospedado do GitHub e CD em runner self-hosted
 
 **Status:** Aceito
+**Atualizado por:** [ADR-014](ADR-014-identidade-em-repositorio-proprio.md)
 **Data:** 2026-10-03
 
 ## Contexto
@@ -53,3 +54,11 @@ O time de qualidade exige que toda implantação ou alteração passe por CI/CD 
 - Dentro do container o runner roda como o usuário `runner` (UID 1001), não como root; o acesso ao socket vem do grupo do socket, ajustado pelo entrypoint. O token de registro é de uso único, só trafega por variável de ambiente e não fica disponível para os jobs.
 - O job registra o resultado no resumo da execução.
 - Aprovações exigidas = 0, mas CI verde obrigatório e checklist no template de PR. A decisão fica registrada aqui.
+
+## Atualização (ADR-014, 2026-10-04)
+
+Atualizado por [ADR-014](ADR-014-identidade-em-repositorio-proprio.md). O modelo (CI hospedado, CD self-hosted em container) continua o mesmo, agora replicado em dois repositórios:
+
+- **Este repositório**: CI com os checks `qualidade`, `testes`, `imagem` e `infra` (a validação do realm saiu do job `infra`); CD no runner `revenda-runner`, que grava o state em `/revenda-state/revenda-api.tfstate` e roda `terraform init -reconfigure`. Antes do `terraform apply`, o CD verifica se o realm `revenda` responde em `http://revenda-control-plane:30180` e falha cedo se a identidade não estiver implantada. No e2e, lê do namespace `identidade` apenas os Secrets de contrato `keycloak-gestor` e `keycloak-e2e`; não usa mais o admin do realm `master`.
+- **Repositório [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade)**: CI com os checks `qualidade`, `realm` (sobe um Keycloak real via docker compose e testa o contrato) e `infra`; CD num runner self-hosted próprio (container `revenda-runner-identidade`), com state `identidade.tfstate`.
+- Os dois runners compartilham o mesmo Docker Desktop, a rede `kind` e o diretório `%USERPROFILE%\.revenda`, mas cada CD só lê e grava o próprio arquivo de state.

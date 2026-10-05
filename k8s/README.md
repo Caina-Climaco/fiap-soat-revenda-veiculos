@@ -6,7 +6,9 @@ k8s/
 └── migracao/    # Job revenda-migracao (alembic upgrade head)
 ```
 
-Tudo no namespace `revenda`. A plataforma (namespaces, Secrets, bancos, Keycloak, metrics-server) vem do Terraform em `infra/terraform`; estes manifestos só **referenciam** os Secrets `revenda-db-credentials` (`DB_USER`, `DB_PASSWORD`, `DB_NAME`) e `revenda-webhook-secret` (`WEBHOOK_SECRET`).
+Tudo no namespace `revenda`. A plataforma da API (namespace, Secrets, `revenda-db`, metrics-server) vem do Terraform em `infra/terraform`; estes manifestos só **referenciam** os Secrets `revenda-db-credentials` (`DB_USER`, `DB_PASSWORD`, `DB_NAME`) e `revenda-webhook-secret` (`WEBHOOK_SECRET`).
+
+O Keycloak não é implantado aqui nem pelo Terraform deste repositório: ele vem do repositório [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade) ([ADR-014](../docs/adrs/ADR-014-identidade-em-repositorio-proprio.md)). O `base/configmap.yaml` é o único lugar com o contrato consumido: `OIDC_ISSUER` (`http://localhost:8180/realms/revenda`), `OIDC_JWKS_URL` (`http://keycloak.identidade.svc.cluster.local:8080/realms/revenda/protocol/openid-connect/certs`), `OIDC_AUDIENCE` (`revenda-api`) e `OIDC_SWAGGER_CLIENT_ID` (`revenda-swagger`).
 
 ## Contrato com o CD (`.github/workflows/cd.yml`)
 

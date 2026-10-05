@@ -9,7 +9,7 @@ terraform {
   required_version = ">= 1.9.0"
 
   required_providers {
-    # Namespaces, Secrets, ConfigMap, StatefulSets, Deployment, Services e NetworkPolicies
+    # Namespace, Secrets, StatefulSet, Service e NetworkPolicy
     # (recursos tipados *_v1; a serie 3.x deprecou os recursos sem sufixo).
     kubernetes = {
       source  = "hashicorp/kubernetes"
@@ -28,7 +28,7 @@ terraform {
   }
 
   # State local FORA do repositorio. O caminho vem na inicializacao (configuracao parcial):
-  #   terraform init -backend-config="path=$USERPROFILE/.revenda/terraform.tfstate"
+  #   terraform init -backend-config="path=$USERPROFILE/.revenda/revenda-api.tfstate"
   # O state contem os segredos gerados em texto claro (ADR-011): nunca versionar.
   backend "local" {}
 }

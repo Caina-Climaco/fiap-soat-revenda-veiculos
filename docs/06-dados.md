@@ -7,7 +7,7 @@ Este documento descreve o modelo físico de dados da solução: as tabelas dos m
 | Instância | Namespace | Banco | Schemas | Dono lógico | Contém dados pessoais? |
 |---|---|---|---|---|---|
 | StatefulSet `revenda-db` (`postgres:16-alpine`) | `revenda` | `revenda` | `catalogo`, `vendas` (+ `public.alembic_version`) | `revenda-api` | **Não** (apenas o pseudônimo `comprador_id`) |
-| StatefulSet `keycloak-db` (`postgres:16-alpine`) | `identidade` | `keycloak` | `public` (schema gerenciado pelo Keycloak) | Keycloak | **Sim** (nome, e-mail, CPF, telefone, credenciais) |
+| StatefulSet `keycloak-db` (`postgres:16-alpine`), do repositório de identidade | `identidade` | `keycloak` | `public` (schema gerenciado pelo Keycloak) | Keycloak | **Sim** (nome, e-mail, CPF, telefone, credenciais) |
 
 Cada módulo é dono do seu schema: somente o código de `catalogo/infrastructure` mapeia tabelas de `catalogo`, e somente `vendas/infrastructure` mapeia tabelas de `vendas`. A única ligação entre os schemas é a **referência lógica** `vendas.vendas.veiculo_id → catalogo.veiculos.id`, **sem chave estrangeira** entre schemas: isso preserva a fronteira dos módulos e permite extrair Vendas para outro serviço no futuro. A integridade é garantida pela aplicação (a venda só é criada depois de `CatalogoPort.reservar` confirmar o veículo, na mesma transação; veículos não têm endpoint de exclusão) e pelo índice único parcial ([ADR-004](adrs/ADR-004-postgresql-schemas.md)).
 
@@ -152,11 +152,11 @@ Executar a migração em um Job único, e não no *startup* de cada pod, evita a
 
 ### 5.4 Dados iniciais
 
-O banco `revenda` não recebe *seed* por migração: os veículos são cadastrados pela API (passo 1 do roteiro). O realm, os papéis, os clients e o usuário `gestor.loja` são criados pela importação do realm no Keycloak (`keycloak/realm-revenda.json` via ConfigMap), com a senha do gestor injetada por variável de ambiente a partir do Secret `keycloak-gestor`.
+O banco `revenda` não recebe *seed* por migração: os veículos são cadastrados pela API (passo 1 do roteiro). O realm, os papéis, os clients e o usuário `gestor.loja` são responsabilidade do repositório de identidade ([fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade)): o realm é importado no Keycloak e o `gestor.loja` é reconciliado pelo Job `keycloak-reconciliar`, com a senha vinda do Secret `keycloak-gestor`. Os detalhes estão no `README.md` daquele repositório.
 
 ## 6. Separação física dos dados pessoais
 
-O enunciado exige que os dados de clientes fiquem "totalmente apartados" dos dados transacionais. A separação é **física** (outra instância PostgreSQL, outro StatefulSet, outro volume, outro namespace, outras credenciais e NetworkPolicy própria), e não apenas lógica (outro schema). A API não tem credenciais para o banco do Keycloak, e o Keycloak não tem credenciais para o banco da API.
+O enunciado exige que os dados de clientes fiquem "totalmente apartados" dos dados transacionais. A separação é **física** (outra instância PostgreSQL, outro StatefulSet, outro volume, outro namespace, outras credenciais e NetworkPolicy própria), e não apenas lógica (outro schema). Desde o [ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md) ela também é de entrega: o banco do Keycloak é declarado em outro repositório, com outro state do Terraform; este repositório não contém nem a definição nem as credenciais dele. A API não tem credenciais para o banco do Keycloak, e o Keycloak não tem credenciais para o banco da API.
 
 | Dado | Onde fica | Por quê |
 |---|---|---|
@@ -171,7 +171,7 @@ O enunciado exige que os dados de clientes fiquem "totalmente apartados" dos dad
 | Venda (preço, status, datas, código de pagamento) | API: `vendas.vendas` | Dado transacional; vinculado ao titular apenas pelo pseudônimo |
 | Snapshot do veículo na venda | API: `vendas.vendas.veiculo_*` | Histórico imutável da transação |
 
-Nos clients `revenda-swagger` e `revenda-e2e`, os escopos `profile` e `email` são apenas **opcionais** (não são concedidos por padrão), e o escopo `basic` fornece o `sub`. O access token emitido para a API carrega somente `sub`, `realm_access.roles` (papéis), `aud` (`revenda-api`, pelo mapper de audiência), `azp` e as claims técnicas do OIDC (`iss`, `exp`, `iat`, `jti`, `typ`); nome, e-mail, CPF e telefone não chegam à API pelo token. Observação: o realm é importado com a estratégia `IGNORE_EXISTING`, isto é, só na criação; num ambiente já existente, uma mudança de escopos no `realm-revenda.json` só vale depois de recriar o realm (ou de aplicá-la pelo console de administração). A análise de LGPD está em [07-seguranca-lgpd.md](07-seguranca-lgpd.md).
+Nos clients `revenda-swagger` e `revenda-e2e`, os escopos `profile` e `email` são apenas **opcionais** (não são concedidos por padrão), e o escopo `basic` fornece o `sub`. O access token emitido para a API carrega somente `sub`, `realm_access.roles` (papéis), `aud` (`revenda-api`, pelo mapper de audiência), `azp` e as claims técnicas do OIDC (`iss`, `exp`, `iat`, `jti`, `typ`); nome, e-mail, CPF e telefone não chegam à API pelo token. Essas regras de escopo fazem parte do contrato publicado pelo repositório de identidade (`docs/contrato-identidade.md`) e são testadas no CI dele. A análise de LGPD está em [07-seguranca-lgpd.md](07-seguranca-lgpd.md).
 
 ## 7. Backup e retenção (ambiente local)
 
