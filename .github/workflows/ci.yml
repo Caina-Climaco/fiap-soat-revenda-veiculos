@@ -229,6 +229,50 @@ jobs:
             echo "::endgroup::"
           done
 
+      # API Gateway (ADR-015): a configuracao declarativa do Kong e um template do Terraform;
+      # aqui ela e renderizada com valores de teste e validada pelo proprio Kong.
+      - name: Kong (kong config parse da configuracao declarativa)
+        env:
+          KONG_IMAGEM: kong:3.9.3
+        run: |
+          set -euo pipefail
+          mkdir -p "${RUNNER_TEMP}/kong"
+          # \$ escapado: os placeholders ${...} do template sao literais aqui
+          sed -e "s/\${webhook_secret}/segredo-de-teste-do-ci/" \
+              -e "s/\${limite_geral_minuto}/600/" \
+              -e "s/\${limite_compra_minuto}/60/" \
+              infra/kong/kong.yml.tftpl > "${RUNNER_TEMP}/kong/kong.yml"
+          if grep -nF "\${" "${RUNNER_TEMP}/kong/kong.yml"; then
+            echo "::error file=infra/kong/kong.yml.tftpl::placeholder sem valor de teste no CI"
+            exit 1
+          fi
+          docker run --rm -e KONG_DATABASE=off -v "${RUNNER_TEMP}/kong:/k:ro" "$KONG_IMAGEM" \
+            kong config parse /k/kong.yml
+
+      # Monitoramento (ADR-016): sintaxe da configuracao, das regras e testes de unidade dos
+      # alertas (promtool test rules), e o painel do Grafana como JSON valido.
+      - name: Prometheus (promtool check + test rules) e painel do Grafana
+        env:
+          PROMETHEUS_IMAGEM: prom/prometheus:v3.14.0
+        run: |
+          set -euo pipefail
+          promtool() {
+            docker run --rm -v "$PWD/infra/observabilidade:/o:ro" -w /o --entrypoint promtool \
+              "$PROMETHEUS_IMAGEM" "$@"
+          }
+          # O arquivo de regras e montado no pod em /etc/prometheus; aqui, no diretorio atual
+          sed 's#/etc/prometheus/alertas.yml#alertas.yml#' infra/observabilidade/prometheus.yml \
+            > infra/observabilidade/.prometheus-ci.yml
+          promtool check config .prometheus-ci.yml
+          rm -f infra/observabilidade/.prometheus-ci.yml
+          promtool check rules alertas.yml
+          promtool test rules alertas.test.yml
+          painel=infra/observabilidade/grafana/painel-revenda.json
+          jq -e '.uid == "revenda-visao-geral" and (.panels | length) > 0' "$painel" >/dev/null
+          # Todo painel usa a fonte de dados provisionada (uid prometheus)
+          jq -e '[.panels[] | select(.type != "row") | .datasource.uid] | all(. == "prometheus")' "$painel" >/dev/null
+          echo "Monitoramento OK"
+
       - name: Cluster kind (infra/kind/cluster.yaml valido e portas do contrato)
         run: |
           set -euo pipefail
@@ -236,7 +280,7 @@ jobs:
           # yq (mikefarah) vem na imagem ubuntu-latest; falha se o YAML for invalido
           yq -e '.kind == "Cluster" and .name == "revenda"' "$arquivo" >/dev/null \
             || { echo "::error file=${arquivo}::YAML invalido ou sem kind: Cluster / name: revenda"; exit 1; }
-          for par in 30080:8080 30180:8180 30432:15432; do
+          for par in 30080:8080 30180:8180 30432:15432 30300:3000 30900:9090; do
             c="${par%%:*}"; h="${par##*:}"
             yq -e "[.nodes[].extraPortMappings[] | select(.containerPort == ${c} and .hostPort == ${h})] | length == 1" "$arquivo" >/dev/null \
               || { echo "::error file=${arquivo}::extraPortMapping ${c} -> ${h} ausente"; exit 1; }

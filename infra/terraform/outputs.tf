@@ -14,8 +14,10 @@ output "cluster" {
 output "urls" {
   description = "Enderecos locais (apenas 127.0.0.1)."
   value = {
-    api                   = "http://localhost:8080"
+    api                   = "http://localhost:8080 (API Gateway Kong; a API e ClusterIP)"
     swagger               = "http://localhost:8080/docs"
+    grafana               = "http://localhost:3000"
+    prometheus            = "http://localhost:9090"
     oidc_issuer_consumido = "http://localhost:8180/realms/revenda (servico de identidade, outro repositorio)"
     revenda_db_host       = var.expor_banco_revenda ? "localhost:15432 (banco revenda)" : "nao exposto (use kubectl exec)"
   }
@@ -27,10 +29,14 @@ output "secrets" {
   value = {
     "revenda/revenda-db-credentials" = ["DB_USER", "DB_PASSWORD", "DB_NAME"]
     "revenda/revenda-webhook-secret" = ["WEBHOOK_SECRET"]
+    "gateway/kong-config"            = ["kong.yml"]
+    "observabilidade/grafana-admin"  = ["GF_SECURITY_ADMIN_USER", "GF_SECURITY_ADMIN_PASSWORD"]
   }
   depends_on = [
     kubernetes_secret_v1.revenda_db_credentials,
     kubernetes_secret_v1.revenda_webhook_secret,
+    kubernetes_secret_v1.kong_config,
+    kubernetes_secret_v1.grafana_admin,
   ]
 }
 
@@ -38,6 +44,7 @@ output "comandos_segredos" {
   description = "Como ler os segredos com kubectl (Git Bash/Linux; no PowerShell, decodifique com [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String(...)))."
   value = {
     webhook_secret   = "kubectl -n revenda get secret revenda-webhook-secret -o jsonpath='{.data.WEBHOOK_SECRET}' | base64 -d"
+    senha_grafana    = "kubectl -n observabilidade get secret grafana-admin -o jsonpath='{.data.GF_SECURITY_ADMIN_PASSWORD}' | base64 -d"
     senha_revenda_db = "kubectl -n revenda get secret revenda-db-credentials -o jsonpath='{.data.DB_PASSWORD}' | base64 -d"
   }
 }
@@ -49,5 +56,7 @@ output "comandos_uteis" {
     psql_revenda = "kubectl -n revenda exec -it statefulset/revenda-db -- psql -U revenda -d revenda"
     hpa          = "kubectl -n revenda get hpa revenda-api"
     top          = "kubectl -n revenda top pods"
+    kong         = "kubectl -n gateway logs deployment/kong --tail=50"
+    alvos        = "http://localhost:9090/targets"
   }
 }

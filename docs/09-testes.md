@@ -6,7 +6,7 @@ Este documento define a estratégia de testes da API de revenda de veículos: os
 
 ```mermaid
 flowchart TB
-    E2E["E2E (marcador e2e)<br/>poucos testes, ambiente implantado<br/>API + Keycloak reais"]
+    E2E["E2E (marcador e2e)<br/>poucos testes, ambiente implantado<br/>Kong + API + Keycloak reais"]
     INT["Integração (marcador integration)<br/>PostgreSQL real, API com TestClient<br/>tokens assinados por chave de teste"]
     UNI["Unidade (marcador unit)<br/>domínio e casos de uso<br/>sem banco, sem rede, relógio fixo"]
     E2E --- INT --- UNI
@@ -20,7 +20,8 @@ flowchart TB
 |---|---|---|---|---|---|
 | Unidade | `unit` | ~70% dos testes | Agregados `Veiculo` e `Venda` (transições, invariantes, expiração, idempotência), value objects (código de pagamento, preço, ano), casos de uso com repositórios em memória, `CatalogoPort` falso e relógio fixo; validação de JWT com chave RSA gerada no teste; regras de arquitetura (imports) | SQL, HTTP, Keycloak | Nada externo |
 | Integração | `integration` | ~25% | Repositórios SQLAlchemy contra PostgreSQL 16 (ordenação, paginação, índice único parcial, UPDATE condicional); concorrência real (N compras simultâneas do mesmo veículo); API completa com `TestClient` (status HTTP, `problem+json`, autorização por papel, webhook); migrações Alembic aplicadas do zero | Keycloak real, cluster | PostgreSQL (docker compose localmente; *service container* no CI) |
-| Ponta a ponta | `e2e` | ~5% | Fluxo do roteiro do vídeo contra o ambiente implantado no kind: tokens reais do Keycloak, compra, webhook, efetivação, listagens | Casos de borda já cobertos abaixo | Cluster kind com API (8080) e Keycloak (8180, implantado pelo repositório de identidade) |
+| Ponta a ponta | `e2e` | ~5% | Fluxo do roteiro do vídeo contra o ambiente implantado no kind, pelo API Gateway: tokens reais do Keycloak, compra, webhook, efetivação, listagens; regras de borda do Kong (*rate limiting*, `X-Request-ID`, `/metrics` fechado, webhook barrado ou encaminhado) | Casos de borda já cobertos abaixo | Cluster kind com o Kong (8080) na frente da API e Keycloak (8180, implantado pelo repositório de identidade) |
+| Configuração de infraestrutura | — (CI, job `infra`) | — | Configuração declarativa do Kong (`kong config parse`); regras de alerta do Prometheus com testes de unidade (`promtool test rules`); configuração do Prometheus e JSON do painel | Comportamento em execução (coberto pelo e2e e pela etapa "Monitoramento" do CD) | Docker (imagens `kong:3.9.3` e `prom/prometheus:v3.14.0`) |
 | Carga | — (script k6, fora do pytest) | — | Meta de desempenho das listagens (RNF-10) e reação do HPA (RNF-09) | Correção funcional | Cluster kind ou docker compose, k6 |
 
 ## 9.2 Ferramentas
@@ -36,6 +37,8 @@ flowchart TB
 | Alembic | Aplica as migrações no banco de teste antes da suíte de integração |
 | ruff, mypy | Lint, formatação e tipos (não são testes, mas bloqueiam o CI) |
 | k6 | Teste de carga nas listagens (`tests/carga/listagens.js`) |
+| `kong config parse` | Valida a configuração declarativa do Kong renderizada com valores de teste |
+| promtool | `check config`, `check rules` e `test rules` das regras de alerta (`infra/observabilidade/alertas.test.yml`) |
 
 Os cenários Gherkin da seção 9.5 são especificação: são implementados como funções pytest comuns (sem pytest-bdd), cujo nome e *docstring* citam o identificador do cenário (ex.: `test_bdd_03_compra_concorrente`), mantendo a rastreabilidade sem uma dependência a mais.
 
@@ -75,9 +78,9 @@ Observações:
 
 - Os testes `e2e` ficam fora da execução padrão (`addopts = -m "not e2e"` no `pyproject.toml`); só rodam quando selecionados explicitamente.
 - O e2e obtém tokens pelo client `revenda-e2e` (password grant), habilitado somente no realm do ambiente local; cria seus próprios clientes de teste com nomes aleatórios para poder ser executado repetidas vezes, pela Admin API do realm `revenda`, com o client técnico `revenda-e2e-admin` (client credentials, só `manage-users`, `view-users` e `query-users`). O admin do realm `master` não é usado. Os dois clients e os Secrets `keycloak-gestor` e `keycloak-e2e` são parte do contrato publicado pelo [repositório de identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade).
-- Variáveis do e2e: `E2E_API_URL` e `E2E_KEYCLOAK_URL` (opcionais), `E2E_GESTOR_PASSWORD`, `E2E_WEBHOOK_SECRET` e `E2E_KC_CLIENT_SECRET` (obrigatórias), `E2E_KC_CLIENT_ID` (padrão `revenda-e2e-admin`), `E2E_GESTOR_USERNAME` (padrão `gestor.loja`), `E2E_RESERVA_TTL_MINUTOS` (padrão 30) e `E2E_EXIGIR` (`1` transforma variável ausente em erro).
+- Variáveis do e2e: `E2E_API_URL` e `E2E_KEYCLOAK_URL` (opcionais), `E2E_GESTOR_PASSWORD`, `E2E_WEBHOOK_SECRET` e `E2E_KC_CLIENT_SECRET` (obrigatórias), `E2E_KC_CLIENT_ID` (padrão `revenda-e2e-admin`), `E2E_GESTOR_USERNAME` (padrão `gestor.loja`), `E2E_RESERVA_TTL_MINUTOS` (padrão 30), `E2E_EXIGIR` (`1` transforma variável ausente em erro) e `E2E_GATEWAY` (`1` exige o API Gateway; sem ela, o gateway é detectado pelo cabeçalho `Via` e, sem Kong, os testes de `test_e2e_gateway.py` são pulados).
 - O docker compose cria o banco `revenda_test` na primeira subida do serviço `postgres`, com o usuário `revenda` e a senha `DB_PASSWORD` do `.env`. Sem `TEST_DATABASE_URL`, os testes de integração são pulados com aviso.
-- No CI, a etapa de integração usa o *service container* `postgres:16-alpine` (credenciais fixas de teste, sem segredo real); no CD, o e2e roda no runner self-hosted após o rollout, contra `http://revenda-control-plane:30080` e `:30180`. O contrato do realm em si (papéis, clients, escopos, perfil de usuário) é testado no CI do repositório de identidade, job `realm`.
+- No CI, a etapa de integração usa o *service container* `postgres:16-alpine` (credenciais fixas de teste, sem segredo real); no CD, o e2e roda no runner self-hosted após o rollout, contra `http://revenda-control-plane:30080` (Kong) e `:30180`, com `E2E_GATEWAY=1`. O contrato do realm em si (papéis, clients, escopos, perfil de usuário) é testado no CI do repositório de identidade, job `realm`.
 
 ## 9.4 Critérios da suíte
 
@@ -90,7 +93,8 @@ Observações:
 | Determinismo | Relógio injetado (`Clock`) em todos os testes que envolvem tempo; nenhum teste depende da hora real |
 | Falhas intermitentes | Teste instável é corrigido ou removido no mesmo PR em que for detectado; não há *retry* automático |
 | Gate de merge | ruff, mypy, unit + integration com cobertura, build, Trivy e validações de infraestrutura verdes |
-| Gate de deploy | e2e verde ao final do CD |
+| Gate de merge (infraestrutura) | `kong config parse` e `promtool test rules` verdes no job `infra` |
+| Gate de deploy | Monitoramento conferido (alvos `up`, regras, painel) e e2e verde ao final do CD |
 
 ## 9.5 Cenários BDD
 
@@ -102,7 +106,7 @@ Observações:
 | BDD-04 | Compra sem cadastro (401) | integração e e2e | RF-04, RN-06 |
 | BDD-05 | Gestor tentando comprar (403) | integração e e2e | RF-04, RN-05 |
 | BDD-06 | Edição de veículo reservado (409) | unidade e integração | RF-02, RN-02 |
-| BDD-07 | Webhook com segredo inválido | integração | RNF-03, RN-19 |
+| BDD-07 | Webhook com segredo inválido | integração (recusa pela API) e e2e (recusa pelo Kong) | RNF-03, RN-19 |
 | BDD-08 | Reserva expirada | unidade e integração (relógio fixo) | RF-15, RN-04, RN-14 |
 | BDD-09 | Listagens ordenadas por preço | integração e e2e | RF-06, RF-07, RN-17 |
 
@@ -310,6 +314,32 @@ Funcionalidade: Listagens públicas ordenadas por preço
     E o total informado é 3
 ```
 
+### 9.5.10 Testes e2e do ambiente implantado
+
+São **23 testes** coletados em `tests/e2e` (contando os casos parametrizados):
+
+| Arquivo | Testes | O que cobre |
+|---|---|---|
+| `test_e2e_catalogo.py` | 7 | Cadastro pelo gestor, cadastro exige papel `gestor`, cadastro inválido (422), edição à venda e de veículo reservado (BDD-06), vitrine ordenada por preço (BDD-09), validação da paginação |
+| `test_e2e_fluxo_compra.py` | 3 | Fluxo início a fim (BDD-01), pagamento recusado devolve o veículo (BDD-02), vendidos ordenados após o webhook aprovado |
+| `test_e2e_vendas_seguranca.py` | 8 | Compra anônima (BDD-04), gestor não compra (BDD-05), webhook com segredo ausente, vazio ou errado (BDD-07, 3 casos), webhook com código desconhecido (404), venda de outro cliente (404), minhas compras exige `cliente` |
+| `test_e2e_gateway.py` | 5 | API Gateway ([ADR-015](adrs/ADR-015-api-gateway-kong.md)): encaminhamento com cabeçalhos `RateLimit-*` e `Via`; `X-Request-ID` propagado ou gerado pelo Kong; rota `compra` com limite menor que a rota geral; `/metrics` → 404 do próprio Kong; webhook com a credencial do consumer `gateway-pagamento` chega à API (404 da API para código inexistente, com `X-Kong-Upstream-Latency`) |
+
+Com o gateway (CD, `E2E_GATEWAY=1`), o BDD-07 no e2e verifica que a recusa vem **do Kong**: status 401, cabeçalho `Server` do Kong e **sem** `X-Kong-Upstream-Latency`, ou seja, a requisição não chegou à API (`assert_barrado_no_gateway` em `tests/e2e/conftest.py`). A validação do segredo na própria API (defesa em profundidade) continua coberta pelo teste de integração. Sem gateway (docker compose), o mesmo teste espera o `problem+json` `webhook-nao-autorizado` da API e os 5 testes do gateway são pulados.
+
+### 9.5.11 Testes das regras de alerta
+
+`infra/observabilidade/alertas.test.yml` tem testes de unidade das regras de `alertas.yml`, executados no job `infra` do CI com `promtool test rules` (séries sintéticas, avaliação em instantes definidos):
+
+| Regra | Verifica |
+|---|---|
+| `RevendaApiFora` | Não dispara com 1 min sem coleta; dispara depois de 2 min (`for: 2m`), com os rótulos e anotações esperados |
+| `RevendaErros5xxAltos` | Dispara com 5% de respostas 5xx; não dispara com tráfego saudável |
+| `KongFora` | Não dispara com o Kong sendo coletado |
+| `KongRejeicoesNaBorda` | Não dispara com tráfego saudável; dispara com 1 rejeição 401 por segundo no webhook (limite: 0,5/s por 5 min) |
+
+No CD, a etapa "Monitoramento" confere que as regras foram carregadas no Prometheus do cluster (pelo menos 3 grupos) e que a API e o Kong estão sendo coletados.
+
 ## 9.6 Teste de carga (k6)
 
 Objetivo: evidenciar RNF-10 (p95 < 300 ms nas listagens públicas) e observar o HPA (RNF-09). O script é `tests/carga/listagens.js`, para o [k6](https://grafana.com/docs/k6/latest/), com instruções em `tests/carga/README.md`:
@@ -321,8 +351,10 @@ Objetivo: evidenciar RNF-10 (p95 < 300 ms nas listagens públicas) e observar o 
 | *Thresholds* | `http_req_duration` com `p(95)<300` (ms) e `http_req_failed` com `rate<0.01` (erro < 1%) |
 | Resultado | O k6 termina com código diferente de zero se algum *threshold* falhar |
 
+> **API Gateway.** No kind, `localhost:8080` é o Kong, com *rate limiting* de 600 req/min por IP em `/api/v1`. Os 20 VUs passam disso em segundos e o excedente vira 429, o que derruba o *threshold* de erro. Para medir a API pelo gateway, eleve o limite antes (`$env:TF_VAR_kong_limite_geral_minuto = "100000"` e o script 04 de novo; o próximo CD volta ao padrão) ou rode contra o docker compose, que não tem gateway. Ver `tests/carga/README.md`.
+
 ```bash
-# Contra o ambiente implantado (kind) ou o docker compose: a API em localhost:8080
+# Contra o ambiente implantado (kind, limite do Kong elevado) ou o docker compose: localhost:8080
 k6 run tests/carga/listagens.js
 # Outra URL: variável API_URL (padrão http://localhost:8080)
 k6 run -e API_URL=http://localhost:8080 tests/carga/listagens.js
@@ -332,4 +364,4 @@ kubectl -n revenda get hpa revenda-api -w
 kubectl -n revenda top pods
 ```
 
-Para um cenário mais próximo do estoque real, cadastre antes algumas centenas de veículos com o token do gestor (como no exemplo com curl do README). O resumo do k6 (p95, taxa de erro, requisições por segundo) e a captura do HPA servem de evidência para o vídeo. Durante a carga, `GET /metrics` mostra o histograma de latência crescendo por rota ([12-observabilidade.md](12-observabilidade.md)).
+Para um cenário mais próximo do estoque real, cadastre antes algumas centenas de veículos com o token do gestor (como no exemplo com curl do README). O resumo do k6 (p95, taxa de erro, requisições por segundo) e a captura do HPA servem de evidência para o vídeo. Durante a carga, o painel do Grafana (http://localhost:3000) mostra tráfego, p95 por rota e o número de réplicas crescendo, e a linha do Kong mostra as requisições e, se houver, as barradas com 429 ([12-observabilidade.md](12-observabilidade.md)).

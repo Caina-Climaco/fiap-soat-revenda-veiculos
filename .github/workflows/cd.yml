@@ -46,8 +46,11 @@ jobs:
       NS_ID: identidade
       # NodePorts pelo nome do no na rede "kind" (localhost:8080/8180 sao do host Windows).
       # O issuer dos tokens continua http://localhost:8180/realms/revenda (KC_HOSTNAME fixo).
+      # 30080 = API Gateway (Kong); a API em si e ClusterIP e so o Kong chega nela (ADR-015).
       E2E_API_URL: http://revenda-control-plane:30080
       E2E_KEYCLOAK_URL: http://revenda-control-plane:30180
+      PROMETHEUS_URL: http://revenda-control-plane:30900
+      GRAFANA_URL: http://revenda-control-plane:30300
       STATE_DIR: /revenda-state
       TF_DATA_DIR: /home/runner/persist/terraform-data
       STATE_FILE: revenda-api.tfstate
@@ -163,7 +166,7 @@ jobs:
           echo "::error::Realm revenda indisponivel em $url. Implante antes o servico de identidade (repositorio fiap-soat-revenda-identidade)."
           exit 1
 
-      - name: Terraform (namespace revenda, segredos, revenda-db, metrics-server)
+      - name: Terraform (revenda, API Gateway Kong, Prometheus/Grafana, metrics-server)
         working-directory: infra/terraform
         run: |
           set -euo pipefail
@@ -174,6 +177,13 @@ jobs:
           if [ -e "${STATE_DIR}/terraform.tfstate" ]; then
             echo "::error::Existe ${STATE_DIR}/terraform.tfstate (ambiente anterior a separacao dos repositorios). Siga a secao 'Migracao' do README antes de implantar."
             exit 1
+          fi
+          # Antes do gateway, o Service revenda-api era NodePort 30080; o Kong assume essa porta.
+          # Converte o Service antigo para ClusterIP (libera a porta) antes de criar o do Kong.
+          if [ "$(kubectl -n "$NS_APP" get service revenda-api -o jsonpath='{.spec.type}' 2>/dev/null || true)" = "NodePort" ]; then
+            echo "Service revenda-api ainda e NodePort: convertendo para ClusterIP (libera a 30080 para o Kong)"
+            kubectl -n "$NS_APP" patch service revenda-api --type=json \
+              -p='[{"op":"replace","path":"/spec/type","value":"ClusterIP"},{"op":"remove","path":"/spec/ports/0/nodePort"}]'
           fi
           terraform init -input=false -reconfigure -backend-config="path=${STATE_DIR}/${STATE_FILE}"
           terraform apply -input=false -auto-approve
@@ -260,6 +270,31 @@ jobs:
           }
           esperar "${E2E_API_URL}/health/ready" 180
 
+      # O Kong ja respondeu ao /health/ready acima; aqui se confere que o monitoramento
+      # enxerga a API e o gateway e que o painel e os alertas foram provisionados (ADR-016).
+      - name: Monitoramento (Prometheus coleta API e Kong; Grafana com o painel)
+        run: |
+          set -euo pipefail
+          consulta() {
+            curl -fsS --max-time 5 --get "${PROMETHEUS_URL}/api/v1/query" --data-urlencode "query=$1" \
+              | jq -r '.data.result[0].value[1] // "0"'
+          }
+          for job in revenda-api kong; do
+            for _ in $(seq 1 24); do
+              alvos="$(consulta "count(up{job=\"${job}\"} == 1)" || echo 0)"
+              [ "${alvos:-0}" != "0" ] && break
+              sleep 5
+            done
+            [ "${alvos:-0}" != "0" ] || { echo "::error::Prometheus sem alvos ativos do job ${job}"; exit 1; }
+            echo "OK: Prometheus coleta ${alvos} alvo(s) do job ${job}"
+          done
+          grupos="$(curl -fsS --max-time 5 "${PROMETHEUS_URL}/api/v1/rules" | jq '.data.groups | length')"
+          [ "$grupos" -ge 3 ] || { echo "::error::Regras de alerta nao carregadas (${grupos} grupos)"; exit 1; }
+          echo "OK: ${grupos} grupos de regras de alerta carregados"
+          curl -fsS --max-time 5 "${GRAFANA_URL}/api/health" >/dev/null
+          titulo="$(curl -fsS --max-time 5 "${GRAFANA_URL}/api/dashboards/uid/revenda-visao-geral" | jq -r '.dashboard.title')"
+          echo "OK: Grafana com o painel '${titulo}'"
+
       - name: Python 3.12 para o e2e
         # python3 da imagem do runner (Ubuntu 24.04); sem actions/setup-python
         run: |
@@ -298,6 +333,8 @@ jobs:
           export E2E_GESTOR_PASSWORD E2E_WEBHOOK_SECRET E2E_KC_CLIENT_ID E2E_KC_CLIENT_SECRET
           # No CD a ausencia de variaveis e erro (nunca skip silencioso).
           export E2E_EXIGIR=1
+          # A API so e alcancavel pelo Kong: os testes do gateway sao obrigatorios aqui.
+          export E2E_GATEWAY=1
           # tests/e2e/pytest.ini isola a configuracao do pyproject (addopts -m "not e2e").
           "$VENV_PY" -m pytest tests/e2e -m e2e -p no:cacheprovider -o addopts="" \
             -v -rA --junitxml="${WORK_TMP}/e2e-junit.xml"
@@ -308,6 +345,8 @@ jobs:
           kubectl get pods -A -o wide || true
           kubectl -n "$NS_APP" get events --sort-by=.lastTimestamp | tail -n 40 || true
           kubectl -n "$NS_APP" logs deployment/revenda-api --all-containers --tail=200 || true
+          kubectl -n gateway logs deployment/kong --tail=80 || true
+          kubectl -n observabilidade get pods -o wide || true
           echo "Rollback: Actions > CD > Run workflow com ref=<sha-anterior>, ou 'kubectl -n revenda rollout undo deployment/revenda-api' (docs/08, secao 6)."
 
       - name: Resumo da implantacao
@@ -329,7 +368,8 @@ jobs:
               attr() { printf '%s' "$linha" | sed -n "s/.* $1=\"\([^\"]*\)\".*/\1/p"; }
               echo "| Testes e2e | $(attr tests) total, $(attr failures) falhas, $(attr errors) erros, $(attr skipped) pulados |"
             fi
-            echo "| API (no PC) | http://localhost:8080 (Swagger em http://localhost:8080/docs) |"
+            echo "| API pelo API Gateway (no PC) | http://localhost:8080 (Swagger em http://localhost:8080/docs) |"
+            echo "| Grafana / Prometheus (no PC) | http://localhost:3000 / http://localhost:9090 |"
             echo "| Keycloak (no PC) | http://localhost:8180 |"
             echo "| Testado pelo runner em | ${E2E_API_URL} e ${E2E_KEYCLOAK_URL} (rede kind) |"
             echo ""

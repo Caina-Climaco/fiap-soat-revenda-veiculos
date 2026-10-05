@@ -19,7 +19,8 @@ Este README segue o que o enunciado pede: [o que é o projeto](#1-o-que-é), [co
 6. [Estrutura de pastas](#6-estrutura-de-pastas)
 7. [Limitações conhecidas](#7-limitações-conhecidas)
 8. [Migração para dois repositórios](#8-migração-para-dois-repositórios)
-9. [Autor](#9-autor)
+9. [Migração para o API Gateway e o monitoramento](#9-migração-para-o-api-gateway-e-o-monitoramento)
+10. [Autor](#10-autor)
 
 ---
 
@@ -53,7 +54,9 @@ Descobertas na modelagem (o enunciado avisa que "nem todos os campos e funcional
 - **Cancelamento** pelo comprador (desistência) ou pela loja enquanto a venda aguarda pagamento.
 - **Gestor não compra** (403), mesmo que tenha também o papel `cliente`.
 - **Minhas compras**, consulta de venda (cliente vê só as próprias; venda alheia retorna 404) e listagem de vendas para o gestor, com filtro por status.
-- Consulta de veículo por id, paginação nas listagens (`limite` ≤ 100, `deslocamento` ≤ 1.000.000), validação estrita de entrada (mensagens em português), erros em `application/problem+json` (RFC 9457), endpoints de saúde (`/health/live`, `/health/ready`) e métricas Prometheus em `/metrics`.
+- Consulta de veículo por id, paginação nas listagens (`limite` ≤ 100, `deslocamento` ≤ 1.000.000), validação estrita de entrada (mensagens em português), erros em `application/problem+json` (RFC 9457), endpoints de saúde (`/health/live`, `/health/ready`) e métricas Prometheus em `/metrics` (lidas só dentro do cluster).
+- **API Gateway (Kong)** como única entrada HTTP: *rate limiting* por IP (mais restrito na compra), credencial do parceiro de pagamento no webhook, `X-Request-ID` e limite de payload na borda ([seção 2.10](#210-api-gateway-kong)).
+- **Monitoramento** com Prometheus e Grafana no cluster: painel de negócio, golden signals da API e do gateway, e regras de alerta testadas no CI ([seção 2.11](#211-monitoramento-prometheus-e-grafana)).
 
 ### 1.3 Identidade separada dos dados transacionais
 
@@ -74,8 +77,17 @@ flowchart LR
   usuario(["Gestor / Cliente / Visitante<br/>navegador ou Swagger UI"])
   gw(["Gateway de pagamento<br/>simulado (Swagger ou curl)"])
 
+  subgraph NSG["namespace gateway"]
+    kong["API Gateway Kong 3.9.3<br/>DB-less, rate limiting,<br/>key-auth do webhook"]
+  end
+
+  subgraph NSO["namespace observabilidade"]
+    prom["Prometheus 3.14<br/>coleta e alertas"]
+    graf["Grafana 13.2<br/>painel"]
+  end
+
   subgraph NSR["namespace revenda"]
-    api["revenda-api<br/>Python 3.12, FastAPI<br/>módulos Catálogo e Vendas"]
+    api["revenda-api (ClusterIP)<br/>Python 3.12, FastAPI<br/>módulos Catálogo e Vendas"]
     mig["Job revenda-migracao<br/>upgrade head tolerante a rollback"]
     dbr[("PostgreSQL revenda<br/>schemas catalogo e vendas<br/>sem dados pessoais")]
   end
@@ -85,20 +97,25 @@ flowchart LR
     dbk[("PostgreSQL keycloak<br/>nome, e-mail, CPF, telefone")]
   end
 
-  usuario -->|"HTTP :8080<br/>Bearer JWT"| api
+  usuario -->|"HTTP :8080<br/>Bearer JWT"| kong
   usuario -->|"login e cadastro :8180<br/>OIDC + PKCE"| kc
-  gw -->|"POST /api/v1/pagamentos/webhook<br/>X-Webhook-Secret"| api
+  usuario -->|"painel :3000"| graf
+  gw -->|"POST /api/v1/pagamentos/webhook<br/>X-Webhook-Secret"| kong
+  kong -->|"HTTP (único caminho<br/>de entrada)"| api
+  prom -->|"scrape /metrics"| api
+  prom -->|"scrape :8100"| kong
+  graf -->|"PromQL"| prom
   api -->|"SQL"| dbr
   mig -->|"DDL"| dbr
   api -->|"JWKS em cache"| kc
   kc -->|"JDBC"| dbk
 ```
 
-Os dois namespaces rodam no mesmo cluster kind local (`revenda`), que é a plataforma compartilhada; cada repositório implanta só o seu namespace, com Terraform e state próprios. A API depende apenas do **contrato público** da identidade: issuer `http://localhost:8180/realms/revenda`, JWKS interno `http://keycloak.identidade.svc.cluster.local:8080/realms/revenda/protocol/openid-connect/certs`, audiência `revenda-api`, papéis `cliente` e `gestor` e client do Swagger `revenda-swagger` (configurados em [`k8s/base/configmap.yaml`](k8s/base/configmap.yaml)).
+Todos os namespaces rodam no mesmo cluster kind local (`revenda`), que é a plataforma compartilhada; cada repositório implanta só os seus namespaces (este: `revenda`, `gateway` e `observabilidade`; o de identidade: `identidade`), com Terraform e state próprios. A API depende apenas do **contrato público** da identidade: issuer `http://localhost:8180/realms/revenda`, JWKS interno `http://keycloak.identidade.svc.cluster.local:8080/realms/revenda/protocol/openid-connect/certs`, audiência `revenda-api`, papéis `cliente` e `gestor` e client do Swagger `revenda-swagger` (configurados em [`k8s/base/configmap.yaml`](k8s/base/configmap.yaml)).
 
 | Repositório | Conteúdo | Pipelines |
 |---|---|---|
-| [fiap-soat-revenda-veiculos](https://github.com/Caina-Climaco/fiap-soat-revenda-veiculos) (este) | API, migrações, manifestos `k8s/`, Terraform do namespace `revenda` (banco, segredos, NetworkPolicy, metrics-server) | CI `qualidade`, `testes`, `imagem`, `infra`; CD no runner `revenda-runner` com e2e |
+| [fiap-soat-revenda-veiculos](https://github.com/Caina-Climaco/fiap-soat-revenda-veiculos) (este) | API, migrações, manifestos `k8s/`, Terraform dos namespaces `revenda` (banco, segredos, NetworkPolicies, metrics-server), `gateway` (Kong) e `observabilidade` (Prometheus, Grafana) | CI `qualidade`, `testes`, `imagem`, `infra`; CD no runner `revenda-runner` com e2e |
 | [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade) | Realm `revenda` versionado, Terraform do namespace `identidade` (Keycloak, banco do Keycloak, segredos, NetworkPolicy, Job `keycloak-reconciliar`) | CI `qualidade`, `realm` (Keycloak real e testes de contrato), `infra`; CD no runner `revenda-runner-identidade` |
 
 ### 2.2 Stack
@@ -109,8 +126,10 @@ Os dois namespaces rodam no mesmo cluster kind local (`revenda`), que é a plata
 | Identidade (outro repositório) | Keycloak 26.7.1, realm versionado em `keycloak/realm-revenda.json` do [repositório de identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade) |
 | Bancos | PostgreSQL 16 (`revenda`, deste repositório; o `keycloak` é outra instância, do repositório de identidade) |
 | Infraestrutura | Docker Desktop, kind (Kubernetes 1.34), Terraform (providers `kubernetes`, `helm`, `random`), kustomize, metrics-server |
+| API Gateway | Kong Gateway OSS 3.9.3, modo DB-less (configuração declarativa versionada) |
+| Monitoramento | Prometheus 3.14.0, Grafana 13.2.3 (fonte de dados, painel e alertas versionados) |
 | CI/CD | GitHub Actions: CI no runner hospedado, CD em runner self-hosted em container |
-| Qualidade | pytest, pytest-cov, ruff, mypy (strict), import-linter, Trivy, kubeconform, hadolint, shellcheck |
+| Qualidade | pytest, pytest-cov, ruff, mypy (strict), import-linter, Trivy, kubeconform, hadolint, shellcheck, `kong config parse`, promtool (`check` e `test rules`) |
 | Ferramentas de desenvolvimento | uv (com `uv.lock`), docker compose |
 
 ### 2.3 Domain-Driven Design
@@ -154,25 +173,44 @@ A compra devolve um `codigo_pagamento` (`PAG-` + 12 hexadecimais). O gateway, ex
 
 Tudo roda no PC do autor (Windows 11, Docker Desktop), sem nuvem:
 
-- **Cluster kind** `revenda` criado pela **CLI `kind`** a partir de [`infra/kind/cluster.yaml`](infra/kind/cluster.yaml) (um nó, imagem fixada por digest, portas do host em `127.0.0.1`: 8080 → API, 8180 → Keycloak, 15432 → banco da API para demonstração). O cluster é a **plataforma local compartilhada** pelos dois repositórios: o `cluster.yaml` é idêntico nos dois, e o CD de cada um cria o cluster se ele faltar. O plano original usava o provider Terraform `tehcyx/kind`, mas o binário dele não tem assinatura de código e foi bloqueado pelo **Smart App Control** do Windows 11; a CLI `kind` é assinada ([ADR-005](docs/adrs/ADR-005-kind-terraform-nodeport.md): kind via CLI, plataforma por Terraform, NodePort sem Ingress).
-- **Terraform** ([`infra/terraform`](infra/README.md)) cuida do que é da API **dentro** do cluster: namespace `revenda`, senhas aleatórias entregues como Secrets (`revenda-db-credentials`, `revenda-webhook-secret`), o PostgreSQL `revenda-db` (StatefulSet + PVC), a NetworkPolicy do banco e o metrics-server. O state fica fora do repositório, em `%USERPROFILE%\.revenda\revenda-api.tfstate` ([ADR-011](docs/adrs/ADR-011-segredos-terraform.md)). O namespace `identidade` (Keycloak, banco do Keycloak, segredos dele) é do repositório de identidade, com o state `%USERPROFILE%\.revenda\identidade.tfstate` ([ADR-014](docs/adrs/ADR-014-identidade-em-repositorio-proprio.md)).
-- **Aplicação** por kustomize ([`k8s/`](k8s/README.md)): Deployment `revenda-api` (não root, sistema de arquivos somente leitura, probes), Service NodePort 30080, HPA 2..5 réplicas e Job de migração Alembic executado antes de cada rollout. A imagem `revenda-api:<sha>` é carregada no nó com `kind load`, sem registry ([ADR-010](docs/adrs/ADR-010-kind-load-sem-registry.md)).
+- **Cluster kind** `revenda` criado pela **CLI `kind`** a partir de [`infra/kind/cluster.yaml`](infra/kind/cluster.yaml) (um nó, imagem fixada por digest, portas do host em `127.0.0.1`: 8080 → API Gateway (Kong), 8180 → Keycloak, 3000 → Grafana, 9090 → Prometheus, 15432 → banco da API para demonstração). O cluster é a **plataforma local compartilhada** pelos dois repositórios: o `cluster.yaml` é idêntico nos dois, e o CD de cada um cria o cluster se ele faltar. O plano original usava o provider Terraform `tehcyx/kind`, mas o binário dele não tem assinatura de código e foi bloqueado pelo **Smart App Control** do Windows 11; a CLI `kind` é assinada ([ADR-005](docs/adrs/ADR-005-kind-terraform-nodeport.md): kind via CLI, plataforma por Terraform, NodePort sem Ingress).
+- **Terraform** ([`infra/terraform`](infra/README.md)) cuida do que é da API **dentro** do cluster: namespace `revenda`, senhas aleatórias entregues como Secrets (`revenda-db-credentials`, `revenda-webhook-secret`), o PostgreSQL `revenda-db` (StatefulSet + PVC), as NetworkPolicies do banco e da API, o metrics-server, o API Gateway Kong (namespace `gateway`) e Prometheus e Grafana (namespace `observabilidade`). O state fica fora do repositório, em `%USERPROFILE%\.revenda\revenda-api.tfstate` ([ADR-011](docs/adrs/ADR-011-segredos-terraform.md)). O namespace `identidade` (Keycloak, banco do Keycloak, segredos dele) é do repositório de identidade, com o state `%USERPROFILE%\.revenda\identidade.tfstate` ([ADR-014](docs/adrs/ADR-014-identidade-em-repositorio-proprio.md)).
+- **Aplicação** por kustomize ([`k8s/`](k8s/README.md)): Deployment `revenda-api` (não root, sistema de arquivos somente leitura, probes), Service **ClusterIP** (o host chega à API só pelo Kong), HPA 2..5 réplicas e Job de migração Alembic executado antes de cada rollout. A imagem `revenda-api:<sha>` é carregada no nó com `kind load`, sem registry ([ADR-010](docs/adrs/ADR-010-kind-load-sem-registry.md)).
 
 ### 2.9 CI/CD
 
 | Etapa | Onde | O que faz |
 |---|---|---|
 | Pull Request | GitHub | `main` protegida: PR obrigatório, 4 checks obrigatórios, branch atualizada, histórico linear, sem force push, regras valendo também para administradores, só squash merge |
-| CI ([`ci.yml`](.github/workflows/ci.yml)) | Runner hospedado (`ubuntu-latest`), em todo PR e push na `main` | `qualidade`: ruff (lint e formato), mypy, import-linter. `testes`: unit + integração contra PostgreSQL de serviço, cobertura mínima de 80%. `imagem`: build da imagem, Trivy (vulnerabilidades CRITICAL/HIGH corrigíveis) e varredura de segredos. `infra`: `terraform fmt`/`validate`, kubeconform nos manifestos, validação do `cluster.yaml`, hadolint e shellcheck do runner (o contrato do realm é testado no CI do repositório de identidade). Um quinto job, `titulo-pr`, valida o título no padrão Conventional Commits (não é obrigatório na proteção) |
-| CD ([`cd.yml`](.github/workflows/cd.yml)) | Runner **self-hosted** num **container Linux** no Docker Desktop (labels `self-hosted`, `Linux`, `kind-local`), só em push na `main` (PR mergeado) ou disparo manual com `ref` ancestral da `main` (outra `ref` é recusada) | Cria o cluster kind se faltar; **confere que o realm `revenda` responde** (sem ele, falha cedo pedindo para implantar a identidade); `terraform apply` (state `revenda-api.tfstate`); build `revenda-api:<sha>`; `kind load`; Job de migração; rollout do Deployment; aguarda a API; **testes e2e** contra o ambiente implantado; resumo no job summary |
+| CI ([`ci.yml`](.github/workflows/ci.yml)) | Runner hospedado (`ubuntu-latest`), em todo PR e push na `main` | `qualidade`: ruff (lint e formato), mypy, import-linter. `testes`: unit + integração contra PostgreSQL de serviço, cobertura mínima de 80%. `imagem`: build da imagem, Trivy (vulnerabilidades CRITICAL/HIGH corrigíveis) e varredura de segredos. `infra`: `terraform fmt`/`validate`, kubeconform nos manifestos, `kong config parse` da configuração do gateway, `promtool check`/`test rules` dos alertas e JSON do painel, validação do `cluster.yaml`, hadolint e shellcheck do runner (o contrato do realm é testado no CI do repositório de identidade). Um quinto job, `titulo-pr`, valida o título no padrão Conventional Commits (não é obrigatório na proteção) |
+| CD ([`cd.yml`](.github/workflows/cd.yml)) | Runner **self-hosted** num **container Linux** no Docker Desktop (labels `self-hosted`, `Linux`, `kind-local`), só em push na `main` (PR mergeado) ou disparo manual com `ref` ancestral da `main` (outra `ref` é recusada) | Cria o cluster kind se faltar; **confere que o realm `revenda` responde** (sem ele, falha cedo pedindo para implantar a identidade); `terraform apply` (state `revenda-api.tfstate`: API, Kong, Prometheus, Grafana); build `revenda-api:<sha>`; `kind load`; Job de migração; rollout do Deployment; aguarda a API pelo Kong; **confere o monitoramento** (alvos da API e do Kong `up` no Prometheus, regras carregadas, painel no Grafana); **testes e2e** pelo gateway; resumo no job summary |
 
 O serviço de identidade tem CI e CD próprios, no repositório dele; o CD da API não implanta nem altera o Keycloak, só consome o contrato (o realm publicado e os Secrets de contrato `keycloak-gestor` e `keycloak-e2e`). O runner roda em container porque o runner nativo para Windows também foi bloqueado pelo Smart App Control. O container fica na rede docker `kind` e compartilha o state do Terraform com os scripts do Windows por bind mount ([ADR-006](docs/adrs/ADR-006-ci-hospedado-cd-self-hosted.md), [docs/08](docs/08-ci-cd-infra.md)). O primeiro deploy automático passou com os 18 testes e2e verdes. Rollback: *Actions > CD > Run workflow* com `ref` = SHA anterior da `main`; o Job de migração da versão anterior reconhece o schema mais novo e não o altera ([docs/08, seção 6](docs/08-ci-cd-infra.md#6-rollback)).
 
-### 2.10 Observabilidade
+### 2.10 API Gateway (Kong)
 
-Logs JSON em stdout com `X-Request-ID` e sem dados pessoais; probes de vida e prontidão; métricas Prometheus em `GET /metrics` (latência, volume e erros por rota template, contadores de negócio), com anotações `prometheus.io/scrape` no pod; metrics-server para o HPA. O APM (New Relic ou Datadog) fica como evolução documentada ([docs/12](docs/12-observabilidade.md), [ADR-012](docs/adrs/ADR-012-observabilidade-prometheus.md)). Não há API Gateway nem Serverless nesta entrega; o motivo e onde eles entrariam estão no [ADR-013](docs/adrs/ADR-013-sem-api-gateway-e-serverless.md).
+O **Kong 3.9.3 em modo DB-less** (namespace `gateway`) é a única entrada HTTP da API: `http://localhost:8080` → NodePort 30080 → Kong → Service `revenda-api` (ClusterIP). A NetworkPolicy `revenda-api-somente-gateway` só deixa o Kong, o Prometheus e o próprio nó (probes) chegarem à API. A configuração é declarativa e versionada ([`infra/kong/kong.yml.tftpl`](infra/kong/kong.yml.tftpl)), renderizada pelo Terraform num Secret e validada no CI com `kong config parse` ([ADR-015](docs/adrs/ADR-015-api-gateway-kong.md)).
 
-### 2.11 Documentação
+| Rota | Caminho | Proteção na borda |
+|---|---|---|
+| `api` | `/api/v1` | *Rate limiting* 600 req/min por IP |
+| `compra` | `POST /api/v1/vendas` | *Rate limiting* 60 req/min por IP |
+| `webhook-pagamento` | `POST /api/v1/pagamentos/webhook` | key-auth (`X-Webhook-Secret`) + ACL: só o consumer `gateway-pagamento`; a API valida o mesmo segredo de novo |
+| `documentacao` | `GET /docs`, `GET /openapi.json` | — |
+| `saude` | `GET /health/*` | — |
+
+Em todas as rotas: `X-Request-ID` (gerado se ausente e devolvido na resposta), payload máximo de 1 MB e métricas do gateway para o Prometheus. `/metrics` da API **não tem rota** (404 do Kong) e a Admin API do Kong não é exposta. O JWT continua validado **só na API**, pelo JWKS do Keycloak: o gateway cuida da borda, a API das regras de acesso.
+
+### 2.11 Monitoramento (Prometheus e Grafana)
+
+Logs JSON em stdout com `X-Request-ID` e sem dados pessoais; probes de vida e prontidão; métricas Prometheus em `GET /metrics` (latência, volume e erros por rota template, contadores de negócio); metrics-server para o HPA ([ADR-012](docs/adrs/ADR-012-observabilidade-prometheus.md)). No namespace `observabilidade` ([ADR-016](docs/adrs/ADR-016-prometheus-grafana.md)):
+
+- **Prometheus 3.14.0** (`http://localhost:9090`) coleta cada réplica da API e o Kong, por descoberta de pods restrita aos namespaces `revenda` e `gateway`, e avalia 8 regras de alerta versionadas em [`infra/observabilidade/alertas.yml`](infra/observabilidade/alertas.yml), com testes de unidade (`promtool test rules`) no CI. Sem Alertmanager: os alertas aparecem em `http://localhost:9090/alerts` e no painel.
+- **Grafana 13.2.3** (`http://localhost:3000`, leitura anônima) abre direto no painel provisionado **"Revenda de Veículos — visão geral"**: negócio (vendas iniciadas, efetivadas e canceladas, veículos cadastrados, réplicas, alertas disparando), golden signals da API e métricas do Kong (requisições por rota, barradas 401/403/429, latências).
+
+O APM (New Relic ou Datadog) e os traços distribuídos continuam como evolução documentada ([docs/12](docs/12-observabilidade.md)). Serverless também fica como evolução ([ADR-013](docs/adrs/ADR-013-sem-api-gateway-e-serverless.md)).
+
+### 2.12 Documentação
 
 | Documento | Conteúdo |
 |---|---|
@@ -187,9 +225,9 @@ Logs JSON em stdout com `X-Request-ID` e sem dados pessoais; probes de vida e pr
 | [09 — Testes](docs/09-testes.md) | Estratégia, níveis, cenários BDD |
 | [10 — Plano de execução](docs/10-plano-execucao.md) | Backlog, DoR/DoD, cronograma, riscos |
 | [11 — Roteiro do vídeo](docs/11-roteiro-video.md) | Roteiro da demonstração em vídeo e checklist de preparação |
-| [12 — Observabilidade](docs/12-observabilidade.md) | Logs, métricas Prometheus (`/metrics`), golden signals, SLIs/SLOs, alertas e APM |
+| [12 — Observabilidade](docs/12-observabilidade.md) | Logs, métricas, Prometheus e Grafana no cluster, painel, golden signals, SLIs/SLOs, alertas ativos e APM |
 | [13 — Design Approval Sheet](docs/13-das.md) | Folha de aprovação do desenho: escopo, decisões, qualidade, riscos, custos |
-| [infra/README.md](infra/README.md) | Detalhes da plataforma (kind, Terraform, runner) |
+| [infra/README.md](infra/README.md) | Detalhes da plataforma (kind, Terraform, Kong, Prometheus/Grafana, runner) |
 | [k8s/README.md](k8s/README.md) | Manifestos da aplicação e contrato com o CD |
 | [Repositório de identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade) | Configuração do realm (`README.md`) e contrato publicado para a API (`docs/contrato-identidade.md`) |
 
@@ -206,9 +244,11 @@ Logs JSON em stdout com `X-Request-ID` e sem dados pessoais; probes de vida e pr
 | [ADR-009](docs/adrs/ADR-009-expiracao-preguicosa.md) | Reserva com expiração preguiçosa |
 | [ADR-010](docs/adrs/ADR-010-kind-load-sem-registry.md) | Imagem carregada no kind sem registry, tag = SHA |
 | [ADR-011](docs/adrs/ADR-011-segredos-terraform.md) | Segredos gerados pelo Terraform, nada sensível versionado |
-| [ADR-012](docs/adrs/ADR-012-observabilidade-prometheus.md) | Métricas Prometheus nativas na API, APM como evolução |
-| [ADR-013](docs/adrs/ADR-013-sem-api-gateway-e-serverless.md) | Sem API Gateway e sem Serverless nesta entrega |
+| [ADR-012](docs/adrs/ADR-012-observabilidade-prometheus.md) | Métricas Prometheus nativas na API, APM como evolução (complementado por ADR-016) |
+| [ADR-013](docs/adrs/ADR-013-sem-api-gateway-e-serverless.md) | Sem API Gateway e sem Serverless nesta entrega (parte de API Gateway substituída por ADR-015; Serverless continua como evolução) |
 | [ADR-014](docs/adrs/ADR-014-identidade-em-repositorio-proprio.md) | Serviço de identidade em repositório próprio, com pipeline, Terraform e state separados |
+| [ADR-015](docs/adrs/ADR-015-api-gateway-kong.md) | API Gateway Kong (DB-less) como única entrada HTTP da API |
+| [ADR-016](docs/adrs/ADR-016-prometheus-grafana.md) | Prometheus e Grafana no cluster, com alertas versionados e testados |
 
 ---
 
@@ -221,7 +261,7 @@ git clone https://github.com/Caina-Climaco/fiap-soat-revenda-identidade.git
 git clone https://github.com/Caina-Climaco/fiap-soat-revenda-veiculos.git
 ```
 
-Há duas formas de rodar. As duas publicam a API em `http://localhost:8080` e o Keycloak em `http://localhost:8180`, portanto **não rode as duas ao mesmo tempo**.
+Há duas formas de rodar. As duas publicam a API em `http://localhost:8080` e o Keycloak em `http://localhost:8180`, portanto **não rode as duas ao mesmo tempo**. Só a opção B tem o API Gateway (Kong) na frente da API e o Prometheus/Grafana; no compose, a porta 8080 é a própria API.
 
 | | Opção A — docker compose | Opção B — ambiente completo (kind) |
 |---|---|---|
@@ -256,7 +296,7 @@ O compose da API sobe só o banco da API, o Job de migração (`alembic upgrade 
 |---|---|
 | API | http://localhost:8080 |
 | Swagger UI | http://localhost:8080/docs |
-| Métricas Prometheus | http://localhost:8080/metrics |
+| Métricas Prometheus (só no compose, sem gateway) | http://localhost:8080/metrics |
 | PostgreSQL da API | `localhost:5432` (usuário `DB_USER`, senha `DB_PASSWORD` do `.env`) |
 | Keycloak e conta do cliente (repositório de identidade) | http://localhost:8180, http://localhost:8180/realms/revenda/account |
 
@@ -272,12 +312,12 @@ curl -s http://localhost:8080/api/v1/vendas -H "Authorization: Bearer $TOKEN"
 
 ### 3.2 Opção B — ambiente completo no Windows (igual ao CD)
 
-**Pré-requisitos**: Windows 10/11, Docker Desktop (com o `kubectl` que ele instala), kind, Terraform, gh (autenticado com `gh auth login`) e git. O script 01 instala kind, Terraform e Helm via winget. Portas livres: 8080, 8180 e 15432.
+**Pré-requisitos**: Windows 10/11, Docker Desktop (com o `kubectl` que ele instala), kind, Terraform, gh (autenticado com `gh auth login`) e git. O script 01 instala kind, Terraform e Helm via winget. Portas livres: 8080, 8180, 3000, 9090 e 15432.
 
 **Ordem para subir tudo do zero:**
 
 1. **Identidade** — no repositório de identidade, `scripts\windows\04-subir-ambiente.ps1` (ou o CD de lá): cria o cluster kind `revenda`, se faltar, e implanta o namespace `identidade` (Keycloak, banco, segredos, realm). Veja o `README.md` daquele repositório.
-2. **Infraestrutura da API** — neste repositório, `scripts\windows\04-subir-ambiente.ps1`: namespace `revenda`, segredos, `revenda-db` e metrics-server. O script **exige** o realm respondendo em `http://localhost:8180` e falha com uma mensagem clara se a identidade não estiver no ar.
+2. **Infraestrutura da API** — neste repositório, `scripts\windows\04-subir-ambiente.ps1`: namespace `revenda`, segredos, `revenda-db`, metrics-server, API Gateway Kong (namespace `gateway`) e Prometheus/Grafana (namespace `observabilidade`). O script **exige** o realm respondendo em `http://localhost:8180` e falha com uma mensagem clara se a identidade não estiver no ar.
 3. **API** — pelo CD deste repositório (merge na `main` ou disparo manual).
 
 Rode os scripts na raiz deste repositório, em PowerShell normal (sem administrador), um por vez:
@@ -324,7 +364,8 @@ kubectl -n revenda rollout status deployment/revenda-api --timeout=180s
 
 | Secret (namespace/nome) | Chaves | Para quê | Repositório |
 |---|---|---|---|
-| `revenda/revenda-webhook-secret` | `WEBHOOK_SECRET` | Header `X-Webhook-Secret` do gateway simulado | este |
+| `revenda/revenda-webhook-secret` | `WEBHOOK_SECRET` | Header `X-Webhook-Secret` do gateway simulado (o mesmo valor é a credencial do consumer `gateway-pagamento` no Kong, Secret `gateway/kong-config`) | este |
+| `observabilidade/grafana-admin` | `GF_SECURITY_ADMIN_USER`, `GF_SECURITY_ADMIN_PASSWORD` | Admin do Grafana (a leitura do painel é anônima) | este |
 | `revenda/revenda-db-credentials` | `DB_USER`, `DB_PASSWORD`, `DB_NAME` | Banco da API (`revenda`/`revenda`) | este |
 | `identidade/keycloak-gestor` | `GESTOR_PASSWORD` | Senha do usuário `gestor.loja` (login e e2e) | identidade |
 | `identidade/keycloak-e2e` | `E2E_ADMIN_CLIENT_ID`, `E2E_ADMIN_CLIENT_SECRET` | Client técnico `revenda-e2e-admin` dos testes e2e (só gerencia usuários do realm `revenda`) | identidade |
@@ -340,6 +381,7 @@ Segredo identidade keycloak-gestor GESTOR_PASSWORD
 Segredo identidade keycloak-e2e E2E_ADMIN_CLIENT_SECRET
 Segredo revenda revenda-webhook-secret WEBHOOK_SECRET
 Segredo revenda revenda-db-credentials DB_PASSWORD
+Segredo observabilidade grafana-admin GF_SECURITY_ADMIN_PASSWORD
 # copiar sem mostrar na tela: Segredo revenda revenda-webhook-secret WEBHOOK_SECRET | Set-Clipboard
 ```
 
@@ -351,20 +393,24 @@ segredo identidade keycloak-gestor GESTOR_PASSWORD
 segredo identidade keycloak-e2e E2E_ADMIN_CLIENT_SECRET
 segredo revenda revenda-webhook-secret WEBHOOK_SECRET
 segredo revenda revenda-db-credentials DB_PASSWORD
+segredo observabilidade grafana-admin GF_SECURITY_ADMIN_PASSWORD
 ```
 
 **URLs** (todas só em `127.0.0.1`):
 
 | Serviço | Endereço |
 |---|---|
-| API | http://localhost:8080 |
+| API, pelo API Gateway (Kong) | http://localhost:8080 |
 | Swagger UI | http://localhost:8080/docs (OpenAPI em `/openapi.json`) |
-| Métricas Prometheus | http://localhost:8080/metrics |
+| Grafana (painel "Revenda de Veículos — visão geral") | http://localhost:3000 (leitura anônima; admin `admin` com a senha do Secret `observabilidade/grafana-admin`) |
+| Prometheus (consultas e alertas) | http://localhost:9090 (alertas em http://localhost:9090/alerts) |
 | Keycloak (repositório de identidade) | http://localhost:8180 |
 | Conta do cliente (dados do titular) | http://localhost:8180/realms/revenda/account |
 | Banco da API (demonstração) | `localhost:15432`, usuário `revenda`, banco `revenda`, senha `DB_PASSWORD`; por exemplo `psql -h localhost -p 15432 -U revenda -d revenda`, ou sem psql instalado: `kubectl -n revenda exec -it statefulset/revenda-db -- psql -U revenda -d revenda` |
 
-Outros comandos úteis: `kubectl get pods -A`, `kubectl -n revenda get hpa revenda-api`. O console admin do Keycloak e os logs dele estão documentados no repositório de identidade.
+`http://localhost:8080/metrics` responde 404 (do Kong): as métricas da API só são lidas dentro do cluster. Para ver o texto bruto de uma réplica: `kubectl -n revenda port-forward deploy/revenda-api 8000:8000` e `curl -s http://localhost:8000/metrics`.
+
+Outros comandos úteis: `kubectl get pods -A`, `kubectl -n revenda get hpa revenda-api`, `kubectl -n gateway logs deployment/kong`. O console admin do Keycloak e os logs dele estão documentados no repositório de identidade.
 
 ### 3.3 Passo a passo de uso pelo Swagger
 
@@ -386,7 +432,7 @@ Dica: o Keycloak mantém a sessão no navegador. Para alternar entre gestor e cl
    ```json
    { "codigo_pagamento": "PAG-xxxxxxxxxxxx", "status": "APROVADO" }
    ```
-   Resposta 200 com `status: "EFETIVADA"` e `efetivada_em`. Com `"RECUSADO"` a venda seria cancelada e o veículo voltaria à vitrine. Sem o segredo correto: 401.
+   Resposta 200 com `status: "EFETIVADA"` e `efetivada_em`. Com `"RECUSADO"` a venda seria cancelada e o veículo voltaria à vitrine. Sem o segredo correto: 401 (na opção B, quem recusa é o próprio Kong, antes de chegar à API).
 8. **Listar vendidos.** `GET /api/v1/veiculos/vendidos`: o veículo aparece com `status: "VENDIDO"`, em ordem de preço.
 9. **Minhas compras.** Como cliente, `GET /api/v1/vendas/minhas`: a venda aparece `EFETIVADA`. O gestor vê todas as vendas, com `comprador_id`, em `GET /api/v1/vendas` (filtro opcional `?status=`).
 
@@ -489,7 +535,7 @@ uv run lint-imports      # camadas por módulo, independência Catálogo x Venda
 
 ### 4.3 Ponta a ponta (e2e) contra o ambiente implantado
 
-Os testes em `tests/e2e` exercitam o fluxo completo contra a API e o Keycloak reais (este implantado pelo repositório de identidade): criam clientes pela Admin API do realm `revenda` com o client técnico `revenda-e2e-admin` (client credentials; nunca o admin do realm `master`), obtêm tokens pelo client `revenda-e2e`, compram, efetivam, testam 401/403/404/409 e removem os usuários de teste ao final. Os veículos que criam (modelos com "E2E") ficam no catálogo. Variáveis:
+Os testes em `tests/e2e` exercitam o fluxo completo contra a API e o Keycloak reais (este implantado pelo repositório de identidade): criam clientes pela Admin API do realm `revenda` com o client técnico `revenda-e2e-admin` (client credentials; nunca o admin do realm `master`), obtêm tokens pelo client `revenda-e2e`, compram, efetivam, testam 401/403/404/409, conferem o API Gateway (cabeçalhos de *rate limiting*, `X-Request-ID`, limite próprio da compra, `/metrics` fechado na borda, webhook barrado ou encaminhado pelo Kong) e removem os usuários de teste ao final. São **23 testes** coletados. Os veículos que criam (modelos com "E2E") ficam no catálogo. Variáveis:
 
 | Variável | Obrigatória | Valor |
 |---|---|---|
@@ -500,6 +546,7 @@ Os testes em `tests/e2e` exercitam o fluxo completo contra a API e o Keycloak re
 | `E2E_KC_CLIENT_SECRET` | sim | `identidade/keycloak-e2e` → `E2E_ADMIN_CLIENT_SECRET` |
 | `E2E_KC_CLIENT_ID` | não | Padrão `revenda-e2e-admin` (`identidade/keycloak-e2e` → `E2E_ADMIN_CLIENT_ID`) |
 | `E2E_EXIGIR` | não | `1` transforma variável ausente em erro (usado no CD); sem ela, os testes são pulados |
+| `E2E_GATEWAY` | não | `1` exige que a API esteja atrás do Kong (usado no CD); sem ela, o gateway é detectado pelo cabeçalho `Via` e, no compose (sem Kong), os 5 testes de `test_e2e_gateway.py` são pulados |
 
 bash:
 
@@ -529,10 +576,11 @@ O teste de carga `tests/carga/listagens.js` usa o [k6](https://grafana.com/docs/
 ```bash
 k6 run tests/carga/listagens.js
 kubectl -n revenda get hpa revenda-api -w      # em outro terminal (opção B), para ver o HPA
-curl -s http://localhost:8080/metrics | grep '^revenda_'
 ```
 
-`GET /metrics` expõe, no formato Prometheus, a latência e o volume por rota e status e os contadores de negócio (vendas iniciadas, efetivadas e canceladas por motivo; veículos cadastrados). Golden signals, SLOs e alertas propostos estão em [docs/12](docs/12-observabilidade.md).
+Durante a carga, acompanhe o painel do Grafana em http://localhost:3000 (tráfego, p95 por rota, réplicas) e os alertas em http://localhost:9090/alerts (opção B). **Atenção**: com 20 usuários virtuais, o k6 faz milhares de requisições por minuto de um único IP, bem acima do limite de 600 req/min da rota `/api/v1` no Kong; pelo gateway, a maior parte vira 429 e o *threshold* de erro < 1% falha. Para medir a API, rode o teste com o limite elevado (no PowerShell, `$env:TF_VAR_kong_limite_geral_minuto = "100000"` e rode de novo o script 04; o próximo CD, ou o 04 sem a variável, volta ao padrão); ou rode contra o compose (opção A), que não tem gateway. No compose (opção A), as métricas brutas estão em `curl -s http://localhost:8080/metrics | grep '^revenda_'`.
+
+`GET /metrics` expõe, no formato Prometheus, a latência e o volume por rota e status e os contadores de negócio (vendas iniciadas, efetivadas e canceladas por motivo; veículos cadastrados). Golden signals, SLOs, painel e alertas estão em [docs/12](docs/12-observabilidade.md).
 
 ### 4.5 O que o CI e o CD rodam
 
@@ -541,8 +589,8 @@ curl -s http://localhost:8080/metrics | grep '^revenda_'
 | CI, job `qualidade` | `ruff check`, `ruff format --check`, `mypy src`, `lint-imports` |
 | CI, job `testes` | `pytest -m "unit or integration"` com cobertura de ramos e `--cov-fail-under=80`, contra o *service container* `postgres:16-alpine`; publica o `coverage.xml` como artefato |
 | CI, job `imagem` | Build da imagem; Trivy na imagem (CRITICAL/HIGH corrigíveis) e varredura de segredos no repositório |
-| CI, job `infra` | `terraform fmt -check`, `terraform validate`, kubeconform em `k8s/base` e `k8s/migracao`, validação do `infra/kind/cluster.yaml`, hadolint e shellcheck do runner (o realm é validado no CI do repositório de identidade, job `realm`) |
-| CD, job `deploy` | Antes de tudo, confere o discovery do realm `revenda` (pré-requisito); após o rollout, espera `/health/ready`; roda `pytest tests/e2e -m e2e` com `E2E_EXIGIR=1`; o resultado e a contagem de testes vão para o job summary |
+| CI, job `infra` | `terraform fmt -check`, `terraform validate`, kubeconform em `k8s/base` e `k8s/migracao`, `kong config parse` da configuração do Kong (renderizada com valores de teste), `promtool check config`/`check rules`/`test rules` e validação do JSON do painel com `jq`, validação do `infra/kind/cluster.yaml` (incluindo as portas 3000 e 9090), hadolint e shellcheck do runner (o realm é validado no CI do repositório de identidade, job `realm`) |
+| CD, job `deploy` | Antes de tudo, confere o discovery do realm `revenda` (pré-requisito); após o rollout, espera `/health/ready` pelo Kong; etapa **Monitoramento**: alvos `up` dos jobs `revenda-api` e `kong` no Prometheus, 3 grupos de regras carregados e painel `revenda-visao-geral` no Grafana; roda `pytest tests/e2e -m e2e` com `E2E_EXIGIR=1` e `E2E_GATEWAY=1`; o resultado e a contagem de testes vão para o job summary |
 
 ### 4.6 Cobertura
 
@@ -579,7 +627,9 @@ O CI exige no mínimo **80%** de cobertura (linhas e ramos) em `src/revenda`. Co
 │   └── carga/             # teste de carga k6 (listagens.js)
 ├── infra/
 │   ├── kind/cluster.yaml  # cluster kind (CLI kind)
-│   ├── terraform/         # namespace revenda (banco, segredos, NetworkPolicy, metrics-server)
+│   ├── terraform/         # namespaces revenda, gateway e observabilidade
+│   ├── kong/              # configuração declarativa do Kong (template do Terraform)
+│   ├── observabilidade/   # prometheus.yml, alertas.yml (+ testes) e Grafana (fonte, painel)
 │   └── runner/            # imagem do runner self-hosted
 ├── k8s/
 │   ├── base/              # Deployment, Service, HPA, ConfigMap
@@ -599,8 +649,9 @@ O CI exige no mínimo **80%** de cobertura (linhas e ramos) em `src/revenda`. Co
 - **Keycloak em `start-dev`**: adequado ao ambiente de demonstração, não a produção; os clients `revenda-e2e` (password grant) e `revenda-e2e-admin` (gestão de usuários para os testes) existem só localmente.
 - **CPF sem unicidade garantida**: o Keycloak valida o formato, mas não impede o mesmo CPF em duas contas; o identificador único do cadastro é o e-mail.
 - **State local do Terraform**: fica em `%USERPROFILE%\.revenda\revenda-api.tfstate` (o da identidade, em `identidade.tfstate`), sem backend remoto nem *locking*; contém os segredos em texto claro e por isso nunca vai para o repositório.
-- **Sem API Gateway nem rate limiting na borda**: a API é exposta direto por NodePort; os limites de paginação e as validações de entrada reduzem o risco de abuso ([ADR-013](docs/adrs/ADR-013-sem-api-gateway-e-serverless.md)).
-- **Métricas sem Prometheus instalado**: a API expõe `/metrics` e o pod tem as anotações de *scrape*, mas o cluster local não roda Prometheus, Grafana nem APM ([docs/12](docs/12-observabilidade.md)).
+- **Uma réplica do Kong, *rate limiting* local**: o gateway é ponto único de entrada e os contadores de limite são por pod (`policy: local`); com mais réplicas, o limite efetivo se multiplica ([ADR-015](docs/adrs/ADR-015-api-gateway-kong.md)).
+- **Monitoramento sem notificação nem histórico**: não há Alertmanager (os alertas só aparecem no Prometheus e no painel), as métricas ficam 2 dias em disco temporário e se perdem quando o pod reinicia; APM e traços distribuídos continuam como evolução ([ADR-016](docs/adrs/ADR-016-prometheus-grafana.md), [docs/12](docs/12-observabilidade.md)).
+- **Sem Serverless**: o simulador do gateway de pagamento como função continua só documentado ([ADR-013](docs/adrs/ADR-013-sem-api-gateway-e-serverless.md)).
 - **CD depende do PC ligado**: o runner self-hosted roda no PC do autor; com ele desligado, o deploy fica na fila até o runner voltar (ou é disparado de novo com *Run workflow*).
 
 ## 8. Migração para dois repositórios
@@ -619,7 +670,20 @@ Até esta mudança ([ADR-014](docs/adrs/ADR-014-identidade-em-repositorio-propri
 
 No modo docker compose, rode `docker compose down -v --remove-orphans` neste repositório (o `--remove-orphans` remove os containers do Keycloak e do banco dele que ficaram do compose anterior) e `docker volume rm revenda_keycloak-db` (volume antigo, que o compose atual não declara mais), apague do `.env` as variáveis `KC_*` e `GESTOR_PASSWORD` (agora no `.env` do repositório de identidade) e siga a [seção 3.1](#31-opção-a--docker-compose-desenvolvimento).
 
-## 9. Autor
+## 9. Migração para o API Gateway e o monitoramento
+
+Com o API Gateway ([ADR-015](docs/adrs/ADR-015-api-gateway-kong.md)) e o monitoramento ([ADR-016](docs/adrs/ADR-016-prometheus-grafana.md)), o `infra/kind/cluster.yaml` ganhou as portas 3000 (Grafana) e 9090 (Prometheus). O arquivo é idêntico nos dois repositórios; o de identidade recebe a mesma mudança num PR próprio. O kind não acrescenta portas a um cluster existente, então quem já tem o cluster precisa recriá-lo (os dados dos bancos locais são perdidos):
+
+1. Confira que as portas 3000 e 9090 do host estão livres.
+2. Apague o cluster: `kind delete cluster --name revenda`.
+3. Suba a identidade: `scripts\windows\04-subir-ambiente.ps1` no repositório de identidade (ou o CD de lá).
+4. Suba a API: `scripts\windows\04-subir-ambiente.ps1` neste repositório e depois o CD (ou só o CD, que também cria o cluster e aplica o Terraform).
+
+Sem recriar o cluster, as portas 3000 e 9090 não chegam ao host e o primeiro `terraform apply` falha ao criar o Service `kong`, porque o NodePort 30080 ainda pertence ao Service antigo da API (NodePort).
+
+A porta 8080 não muda, mas agora é o Kong: `http://localhost:8080/metrics` passa a responder 404, e as métricas são vistas no Grafana (http://localhost:3000) e no Prometheus (http://localhost:9090).
+
+## 10. Autor
 
 **Cainã Clímaco** — FIAP PósTech Software Architecture (SOAT), Trabalho Substitutivo do Tech Challenge, Fase 3.
 Repositório: https://github.com/Caina-Climaco/fiap-soat-revenda-veiculos

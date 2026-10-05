@@ -1,6 +1,6 @@
 # 08 — CI/CD e infraestrutura
 
-Este documento descreve como o ambiente da API é criado e como o código chega a ele: a infraestrutura como código (cluster kind criado pela CLI `kind`; namespace `revenda`, banco da API e segredos pelo Terraform), os manifestos Kubernetes da aplicação com kustomize, os pipelines de integração e entrega contínuas no GitHub Actions, as regras de governança do repositório, a segurança do runner self-hosted e o procedimento de rollback. A premissa do enunciado é que toda mudança, de implantação ou de código, passa por Pull Request e pipeline. As decisões estão nos [ADR-005](adrs/ADR-005-kind-terraform-nodeport.md), [ADR-006](adrs/ADR-006-ci-hospedado-cd-self-hosted.md), [ADR-010](adrs/ADR-010-kind-load-sem-registry.md), [ADR-011](adrs/ADR-011-segredos-terraform.md) e [ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md).
+Este documento descreve como o ambiente da API é criado e como o código chega a ele: a infraestrutura como código (cluster kind criado pela CLI `kind`; namespace `revenda`, banco da API, segredos, API Gateway Kong e Prometheus/Grafana pelo Terraform), os manifestos Kubernetes da aplicação com kustomize, os pipelines de integração e entrega contínuas no GitHub Actions, as regras de governança do repositório, a segurança do runner self-hosted e o procedimento de rollback. A premissa do enunciado é que toda mudança, de implantação ou de código, passa por Pull Request e pipeline. As decisões estão nos [ADR-005](adrs/ADR-005-kind-terraform-nodeport.md), [ADR-006](adrs/ADR-006-ci-hospedado-cd-self-hosted.md), [ADR-010](adrs/ADR-010-kind-load-sem-registry.md), [ADR-011](adrs/ADR-011-segredos-terraform.md), [ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md), [ADR-015](adrs/ADR-015-api-gateway-kong.md) e [ADR-016](adrs/ADR-016-prometheus-grafana.md).
 
 > **Dois repositórios, dois pipelines.** O serviço de identidade (Keycloak, banco do Keycloak, realm `revenda`, segredos dele) é implantado pelo repositório [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade), com Terraform, state, CI, CD e runner próprios; a infraestrutura e os pipelines dele estão documentados no `README.md` daquele repositório. Este documento trata só da API, que **consome** o contrato da identidade e exige que ela esteja no ar antes do deploy.
 
@@ -11,7 +11,9 @@ O **cluster** é criado pela CLI `kind` a partir de `infra/kind/cluster.yaml`, e
 - o nome `revenda` e um nó control-plane;
 - a imagem do nó, `kindest/node:v1.34.11`, fixada por digest (release kind v0.33.0);
 - `podSubnet: 10.244.0.0/16`;
-- os `extraPortMappings` em `127.0.0.1`: `30080 → 8080` (API), `30180 → 8180` (Keycloak, Service implantado pelo repositório de identidade) e `30432 → 15432` (`revenda-db`, só responde com `expor_banco_revenda = true`).
+- os `extraPortMappings` em `127.0.0.1`: `30080 → 8080` (API Gateway Kong, a entrada da API), `30180 → 8180` (Keycloak, Service implantado pelo repositório de identidade), `30432 → 15432` (`revenda-db`, só responde com `expor_banco_revenda = true`), `30300 → 3000` (Grafana) e `30900 → 9090` (Prometheus).
+
+O kind só aplica `extraPortMappings` na criação do cluster: uma porta nova exige recriá-lo (README, seção "Migração para o API Gateway e o monitoramento").
 
 A criação é idempotente, no CD e em `scripts/windows/04-subir-ambiente.ps1`:
 
@@ -21,15 +23,15 @@ kind export kubeconfig --name revenda      # no Windows (script 04): API em 127.
 # no CD (container na rede docker kind): kind export kubeconfig --internal --name revenda
 ```
 
-O que é da API **dentro** do cluster é Terraform deste repositório; o que é da identidade é Terraform do repositório de identidade. Cada um tem o seu state e só toca o seu namespace.
+O que é da API **dentro** do cluster é Terraform deste repositório (namespaces `revenda`, `gateway` e `observabilidade`); o que é da identidade é Terraform do repositório de identidade. Cada um tem o seu state e só toca os seus namespaces.
 
 ### 1.1 Providers
 
 | Provider | Uso |
 |---|---|
-| `hashicorp/kubernetes` | Namespace, Secrets, StatefulSet, Service, NetworkPolicy |
+| `hashicorp/kubernetes` | Namespaces, Secrets, ConfigMaps, StatefulSet, Deployments (Kong, Prometheus, Grafana), Services, NetworkPolicies, ServiceAccount, Roles e RoleBindings |
 | `hashicorp/helm` | Instala o `metrics-server` (necessário para o HPA) |
-| `hashicorp/random` | Gera a senha do banco e o segredo do webhook (`random_password`) |
+| `hashicorp/random` | Gera a senha do banco, o segredo do webhook e a senha do admin do Grafana (`random_password`) |
 
 As versões dos providers são fixadas em `versions.tf` (`required_providers` com restrição `~>`) e o `.terraform.lock.hcl` é versionado. Os três providers são assinados pela HashiCorp. `kubernetes` e `helm` usam `config_path` (padrão `~/.kube/config`, variável `kubeconfig_path`) e `config_context = "kind-revenda"`.
 
@@ -37,16 +39,18 @@ As versões dos providers são fixadas em `versions.tf` (`required_providers` co
 
 | Recurso | Detalhe |
 |---|---|
-| `kubernetes_namespace` | `revenda` (o `identidade` é criado pelo repositório de identidade) |
+| `kubernetes_namespace` | `revenda`, `gateway` e `observabilidade` (o `identidade` é criado pelo repositório de identidade) |
 | `helm_release.metrics_server` | Chart `metrics-server` em `kube-system`, com `--kubelet-insecure-tls` (certificados autoassinados do kubelet no kind) |
-| `random_password` | `revenda_db` (32 caracteres), `webhook_secret` (48; a API exige no mínimo 16) |
-| `kubernetes_secret` | `revenda-db-credentials` e `revenda-webhook-secret` (ns `revenda`) |
+| `random_password` | `revenda_db` (32 caracteres), `webhook_secret` (48; a API exige no mínimo 16), `grafana_admin` (24) |
+| `kubernetes_secret` | `revenda-db-credentials` e `revenda-webhook-secret` (ns `revenda`); `kong-config` (ns `gateway`); `grafana-admin` (ns `observabilidade`) |
 | PostgreSQL da API | StatefulSet `revenda-db` (`postgres:16.15-alpine`, PVC 1 Gi) + Service `revenda-db`: **NodePort 30432 por padrão** (`expor_banco_revenda = true`, publicado no host em `127.0.0.1:15432` para a demonstração do banco); ClusterIP com `expor_banco_revenda = false` |
-| `kubernetes_network_policy` | `revenda-db` aceita só pods com rótulo `app` igual a `revenda-api` ou `revenda-migracao` (mais o tráfego do NodePort quando `expor_banco_revenda = true`) |
+| `kubernetes_network_policy` | `revenda-db` aceita só pods com rótulo `app` igual a `revenda-api` ou `revenda-migracao` (mais o tráfego do NodePort quando `expor_banco_revenda = true`). `revenda-api-somente-gateway` (`network_policies.tf`): a API (porta 8000) aceita só pods `app=kong` do ns `gateway`, `app=prometheus` do ns `observabilidade` e o tráfego do nó (probes do kubelet) |
+| API Gateway (`gateway.tf`) | Kong `kong:3.9.3` em modo DB-less (Deployment `kong`, 1 réplica, não root, raiz somente leitura). Configuração declarativa: `templatefile` de `infra/kong/kong.yml.tftpl` (com `webhook_secret`, `kong_limite_geral_minuto` = 600 e `kong_limite_compra_minuto` = 60) num Secret `kong-config`; o *hash* da configuração anotado no pod reinicia o Kong quando ela muda. Service `kong` **NodePort 30080** (proxy) e `kong-status` ClusterIP 8100 (status e métricas). Admin API só em `127.0.0.1:8001` |
+| Monitoramento (`observabilidade.tf`) | Prometheus `prom/prometheus:v3.14.0` (Deployment, ServiceAccount `prometheus`, Roles `prometheus-leitura-pods` nos ns `revenda` e `gateway`, ConfigMap `prometheus-config` com `infra/observabilidade/prometheus.yml` e `alertas.yml`, retenção 2 dias em `emptyDir`, Service **NodePort 30900**). Grafana `grafana/grafana:13.2.3` (Deployment, ConfigMaps `grafana-provisionamento` e `grafana-paineis` com os arquivos de `infra/observabilidade/grafana/`, Secret `grafana-admin`, acesso anônimo Viewer, Service **NodePort 30300**) |
 
 O namespace `identidade` (Keycloak 26.7.1, `keycloak-db`, Secrets `keycloak-db-credentials`, `keycloak-admin`, `keycloak-gestor` e `keycloak-e2e`, NetworkPolicy do `keycloak-db` e o Job `keycloak-reconciliar`, que mantém o `gestor.loja` e o client técnico do e2e) é do repositório de identidade.
 
-Fronteira de responsabilidade: a **CLI kind** cria o cluster; o **Terraform** deste repositório cuida da plataforma da API (namespace, segredos, banco, metrics-server), que muda raramente; o **kustomize** cuida da aplicação `revenda-api`, que muda a cada merge; o **repositório de identidade** cuida de tudo o que é do Keycloak.
+Fronteira de responsabilidade: a **CLI kind** cria o cluster; o **Terraform** deste repositório cuida da plataforma da API (namespaces, segredos, banco, metrics-server, Kong, Prometheus e Grafana), que muda raramente; o **kustomize** cuida da aplicação `revenda-api`, que muda a cada merge; o **repositório de identidade** cuida de tudo o que é do Keycloak.
 
 ### 1.3 State: onde fica e por quê
 
@@ -58,7 +62,7 @@ Fronteira de responsabilidade: a **CLI kind** cria o cluster; o **Terraform** de
 
 ### 1.4 Uma única aplicação
 
-Como o cluster já existe quando o Terraform roda, os providers só leem o kubeconfig e o CD executa um único `terraform apply -auto-approve`, sem `-target`. O `terraform destroy` remove só o que é da API (o namespace `revenda` e o metrics-server), nunca o cluster nem a identidade. `scripts/windows/05-destruir-ambiente.ps1` faz o `destroy` e remove o state; com `-ApagarCluster`, também roda `kind delete cluster --name revenda`, o que derruba a identidade junto.
+Como o cluster já existe quando o Terraform roda, os providers só leem o kubeconfig e o CD executa um único `terraform apply -auto-approve`, sem `-target`. O `terraform destroy` remove só o que é da API (os namespaces `revenda`, `gateway` e `observabilidade` e o metrics-server), nunca o cluster nem a identidade. `scripts/windows/05-destruir-ambiente.ps1` faz o `destroy` e remove o state; com `-ApagarCluster`, também roda `kind delete cluster --name revenda`, o que derruba a identidade junto.
 
 ### 1.5 Recriar o ambiente do zero
 
@@ -89,7 +93,7 @@ k8s/
 │   ├── kustomization.yaml   # namespace revenda; images: revenda-api -> tag neutra "dev"
 │   ├── configmap.yaml       # revenda-api-config: DB_HOST, DB_PORT, OIDC_*, RESERVA_TTL_MINUTOS, LOG_LEVEL
 │   ├── deployment.yaml
-│   ├── service.yaml         # NodePort 30080 -> porta http (8000)
+│   ├── service.yaml         # ClusterIP 80 -> porta http (8000); a entrada pelo host é o Kong
 │   └── hpa.yaml
 └── migracao/
     ├── kustomization.yaml
@@ -113,8 +117,8 @@ No repositório a imagem tem a tag neutra `revenda-api:dev`. O CD **não** commi
 | `securityContext` | `runAsNonRoot`, `runAsUser: 10001`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault`; `automountServiceAccountToken: false` |
 | Volumes | `emptyDir` em `/tmp` (64Mi) |
 | Env | `envFrom`: ConfigMap `revenda-api-config` e Secrets `revenda-db-credentials` e `revenda-webhook-secret` |
-| Anotações do pod | `prometheus.io/scrape: "true"`, `prometheus.io/port: "8000"`, `prometheus.io/path: /metrics`, para descoberta automática por um Prometheus no cluster ([12-observabilidade.md](12-observabilidade.md)) |
-| Rótulos | `app: revenda-api` (seletor do Service e rótulo aceito pela NetworkPolicy do `revenda-db`), rótulos `app.kubernetes.io/*` e `revenda.io/acesso-db: "true"` (este último informativo: nenhuma NetworkPolicy o usa; a regra do banco é por `app`) |
+| Anotações do pod | `prometheus.io/scrape: "true"`, `prometheus.io/port: "8000"`, `prometheus.io/path: /metrics`, para a descoberta automática pelo Prometheus do namespace `observabilidade` ([12-observabilidade.md](12-observabilidade.md)) |
+| Rótulos | `app: revenda-api` (seletor do Service, rótulo aceito pela NetworkPolicy do `revenda-db` e alvo da `revenda-api-somente-gateway`), rótulos `app.kubernetes.io/*` e `revenda.io/acesso-db: "true"` (este último informativo: nenhuma NetworkPolicy o usa; a regra do banco é por `app`) |
 
 ### 2.3 HPA
 
@@ -152,8 +156,8 @@ flowchart LR
     direction TB
     kc["kind create cluster (se faltar)<br/>kind export kubeconfig --internal"] --> idc{"realm revenda<br/>responde em :30180?"}
     idc -->|"não"| idf["Falha cedo: implantar<br/>a identidade antes"]
-    idc -->|"sim"| tf["terraform apply<br/>(revenda-api.tfstate)"] --> build["docker build<br/>revenda-api:SHA"] --> load["kind load docker-image"]
-    load --> mig["Job revenda-migracao<br/>tolerante a rollback"] --> roll["kubectl kustomize + sed<br/>kubectl apply -f<br/>rollout status"] --> e2e["pytest -m e2e<br/>revenda-control-plane:30080 / :30180"] --> sum["Resumo no<br/>job summary"]
+    idc -->|"sim"| tf["terraform apply<br/>(revenda-api.tfstate)<br/>API, Kong, Prometheus, Grafana"] --> build["docker build<br/>revenda-api:SHA"] --> load["kind load docker-image"]
+    load --> mig["Job revenda-migracao<br/>tolerante a rollback"] --> roll["kubectl kustomize + sed<br/>kubectl apply -f<br/>rollout status"] --> mon["Monitoramento<br/>alvos up, regras, painel"] --> e2e["pytest -m e2e (E2E_GATEWAY=1)<br/>Kong :30080 / Keycloak :30180"] --> sum["Resumo no<br/>job summary"]
   end
   cd --> kc
   e2e -->|"falhou"| rb["Rollback<br/>(seção 6)"]
@@ -168,14 +172,14 @@ Gatilhos: `pull_request` para `main` e `push` na `main`. Runner: `ubuntu-latest`
 | `qualidade` | Checkout; Python 3.12; uv com cache; `uv sync --frozen`; `ruff check`; `ruff format --check`; `mypy src`; `lint-imports` (contratos de camadas e módulos) | Erro de lint, formatação, tipagem ou violação da regra de dependência |
 | `testes` | *Service container* `postgres:16-alpine` (banco `revenda_test`); `uv sync --frozen`; `uv run pytest -m "unit or integration" --cov=revenda --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=80` (os testes de integração aplicam `alembic upgrade head` do zero no início da sessão); publica o `coverage.xml` como artefato | Teste falho ou cobertura < 80% |
 | `imagem` | Build com Buildx (tag `revenda-api:${{ github.sha }}`, sem push, cache do GitHub Actions); Trivy na imagem (`severity: CRITICAL,HIGH`, `ignore-unfixed: true`, `exit-code: 1`); Trivy `fs` com scanner `secret` no repositório. A `trivy-action` é fixada por SHA de commit | Vulnerabilidade crítica/alta corrigível ou segredo detectado |
-| `infra` | `terraform fmt -check -recursive`; `terraform init -backend=false`; `terraform validate`; `kubectl kustomize` de `k8s/base` e `k8s/migracao` validado com `kubeconform -strict` (binário com checksum); `infra/kind/cluster.yaml` validado com `yq` (YAML válido, os três `extraPortMappings`, imagem por digest); `hadolint` em `infra/runner/Dockerfile` e `shellcheck` em `infra/runner/entrypoint.sh`. O contrato do realm não é validado aqui: ele é testado no CI do repositório de identidade (job `realm`, contra um Keycloak real) | Formatação, configuração inválida ou manifesto fora do schema |
+| `infra` | `terraform fmt -check -recursive`; `terraform init -backend=false`; `terraform validate`; `kubectl kustomize` de `k8s/base` e `k8s/migracao` validado com `kubeconform -strict` (binário com checksum); configuração do Kong: `infra/kong/kong.yml.tftpl` renderizado com valores de teste (`sed`; falha se sobrar placeholder) e validado com `kong config parse` na imagem `kong:3.9.3`; monitoramento: `promtool check config`, `promtool check rules` e `promtool test rules infra/observabilidade/alertas.test.yml` na imagem `prom/prometheus:v3.14.0`, e o painel do Grafana validado com `jq` (uid `revenda-visao-geral`, todos os painéis com a fonte de dados `prometheus`); `infra/kind/cluster.yaml` validado com `yq` (YAML válido, os cinco `extraPortMappings` 30080, 30180, 30432, 30300 e 30900, imagem por digest); `hadolint` em `infra/runner/Dockerfile` e `shellcheck` em `infra/runner/entrypoint.sh`. O contrato do realm não é validado aqui: ele é testado no CI do repositório de identidade (job `realm`, contra um Keycloak real) | Formatação, configuração inválida (Terraform, Kong, Prometheus), teste de alerta falho, painel inválido ou manifesto fora do schema |
 | `titulo-pr` | Só em `pull_request`: valida o título do PR contra a expressão regular de Conventional Commits | Título fora do padrão (não é *required check*) |
 
 Os quatro primeiros jobs rodam em paralelo e são os *required status checks* da `main`. O CI não tem acesso a segredos nem ao cluster.
 
 ### 3.3 `cd.yml`: entrega contínua
 
-Gatilhos: `push` na `main` (ou seja, PR mergeado) e `workflow_dispatch` com input opcional `ref` (rollback). Runner: `runs-on: [self-hosted, Linux, kind-local]`, o container Linux `revenda-runner` no Docker Desktop do PC do autor, ligado à rede docker `kind`. Por estar nessa rede, o runner usa o kubeconfig **interno** (`kind export kubeconfig --internal`, API em `https://revenda-control-plane:6443`) e testa a aplicação pelo nome do nó: `http://revenda-control-plane:30080` (API) e `http://revenda-control-plane:30180` (Keycloak, implantado pelo repositório de identidade), e não por `localhost:8080`/`8180`, que são portas do host Windows. O `iss` dos tokens continua `http://localhost:8180/realms/revenda`, porque `KC_HOSTNAME` é fixo no Keycloak.
+Gatilhos: `push` na `main` (ou seja, PR mergeado) e `workflow_dispatch` com input opcional `ref` (rollback). Runner: `runs-on: [self-hosted, Linux, kind-local]`, o container Linux `revenda-runner` no Docker Desktop do PC do autor, ligado à rede docker `kind`. Por estar nessa rede, o runner usa o kubeconfig **interno** (`kind export kubeconfig --internal`, API em `https://revenda-control-plane:6443`) e testa a aplicação pelo nome do nó: `http://revenda-control-plane:30080` (API, pelo Kong), `http://revenda-control-plane:30180` (Keycloak, implantado pelo repositório de identidade), `:30900` (Prometheus) e `:30300` (Grafana), e não por `localhost:8080`/`8180`, que são portas do host Windows. O `iss` dos tokens continua `http://localhost:8180/realms/revenda`, porque `KC_HOSTNAME` é fixo no Keycloak.
 
 O CD da API não implanta nem altera o Keycloak: ele só confere que o realm está publicado e, no e2e, lê do namespace `identidade` os Secrets de contrato `keycloak-gestor` e `keycloak-e2e`. O state fica em `/revenda-state/revenda-api.tfstate` (variável `STATE_FILE`; bind mount de `%USERPROFILE%\.revenda`, o mesmo arquivo do script 04), com `TF_DATA_DIR` no volume do container (providers Linux). `environment: local`. `concurrency: { group: deploy-local, cancel-in-progress: false }`: deploys são enfileirados, nunca interrompidos no meio. `permissions: contents: read`.
 
@@ -186,15 +190,16 @@ O CD da API não implanta nem altera o Keycloak: ele só confere que o realm est
 | 3. Contexto | Calcula `SHA` e `IMAGEM=revenda-api:<sha>`; confere o bind mount do state e as ferramentas no PATH | — |
 | 4. Cluster kind | Se `kind get clusters` não lista `revenda`: `kind create cluster --config infra/kind/cluster.yaml --wait 120s`; depois `kind export kubeconfig --internal --name revenda` | Contexto `kind-revenda` acessível de dentro do container |
 | 5. Serviço de identidade publicado | `curl` em `http://revenda-control-plane:30180/realms/revenda/.well-known/openid-configuration`, até 24 tentativas a cada 5 s; se não responder, falha com a mensagem "Implante antes o serviço de identidade (repositório fiap-soat-revenda-identidade)" | Realm `revenda` respondendo, antes de qualquer alteração na API |
-| 6. Terraform | `terraform init -reconfigure -backend-config="path=/revenda-state/revenda-api.tfstate"`; um único `terraform apply -auto-approve` (namespace `revenda`, segredos, `revenda-db`, metrics-server) | Plataforma da API convergida (idempotente) |
+| 6. Terraform | `terraform init -reconfigure -backend-config="path=/revenda-state/revenda-api.tfstate"`; um único `terraform apply -auto-approve` (namespace `revenda`, segredos, `revenda-db`, NetworkPolicies, metrics-server, Kong no ns `gateway`, Prometheus e Grafana no ns `observabilidade`) | Plataforma da API convergida (idempotente) |
 | 7. Build | `docker build -t revenda-api:<sha> .` (reaproveita a imagem se ela já existir no Docker local, caso de rollback) | Imagem construída |
 | 8. Carga no kind | `kind load docker-image revenda-api:<sha> --name revenda` | Imagem disponível no nó |
 | 9. Migração | `kubectl delete job revenda-migracao --ignore-not-found --wait=true`; `kubectl kustomize k8s/migracao` + `sed` da imagem + `kubectl apply -f`; espera `complete` ou `failed` em paralelo (até 300 s) | Job com sucesso; em falha, imprime `describe` e logs e encerra **sem** alterar o Deployment |
 | 10. Deploy | `kubectl kustomize k8s/base` + `sed` da imagem + `kubectl apply -f`; anotação `kubernetes.io/change-cause`; `kubectl rollout status deployment/revenda-api --timeout=180s`; confere a imagem final do container `api` | Todas as réplicas novas *ready* com a imagem do SHA |
-| 11. Espera | `GET /health/ready` da API (até 180 s), pelo endereço `revenda-control-plane` | Resposta 2xx |
-| 12. e2e | Lê dos Secrets, via `kubectl`, o segredo do webhook (`revenda/revenda-webhook-secret`) e, do contrato com a identidade, a senha do gestor (`identidade/keycloak-gestor`) e o client técnico `revenda-e2e-admin` (`identidade/keycloak-e2e`: `E2E_ADMIN_CLIENT_ID` e `E2E_ADMIN_CLIENT_SECRET`), todos mascarados com `::add-mask::`; o admin do realm `master` não é usado; cria um venv com `tests/e2e/requirements.txt`; `pytest tests/e2e -m e2e` com `E2E_EXIGIR=1` e relatório JUnit | Fluxo início-a-fim verde ([09-testes.md](09-testes.md)) |
-| 13. Diagnóstico (em falha) | Pods de todos os namespaces, eventos e logs da API (os logs do Keycloak são diagnosticados no repositório de identidade) | — |
-| 14. Resumo | `$GITHUB_STEP_SUMMARY`: SHA, imagem, réplicas prontas, resultado e contagem do e2e, URLs locais | — |
+| 11. Espera | `GET /health/ready` da API (até 180 s), pelo Kong em `revenda-control-plane:30080` | Resposta 2xx (API e gateway no ar) |
+| 12. Monitoramento | Consulta a API HTTP do Prometheus: `count(up{job="revenda-api"} == 1)` e `count(up{job="kong"} == 1)` maiores que zero (até 24 tentativas a cada 5 s); `/api/v1/rules` com pelo menos 3 grupos; `GET /api/health` do Grafana e o painel `revenda-visao-geral` pela API do Grafana | Coleta da API e do Kong ativa, alertas carregados, painel provisionado ([ADR-016](adrs/ADR-016-prometheus-grafana.md)) |
+| 13. e2e | Lê dos Secrets, via `kubectl`, o segredo do webhook (`revenda/revenda-webhook-secret`) e, do contrato com a identidade, a senha do gestor (`identidade/keycloak-gestor`) e o client técnico `revenda-e2e-admin` (`identidade/keycloak-e2e`: `E2E_ADMIN_CLIENT_ID` e `E2E_ADMIN_CLIENT_SECRET`), todos mascarados com `::add-mask::`; o admin do realm `master` não é usado; cria um venv com `tests/e2e/requirements.txt`; `pytest tests/e2e -m e2e` com `E2E_EXIGIR=1`, `E2E_GATEWAY=1` (os testes do gateway são obrigatórios) e relatório JUnit | Fluxo início-a-fim verde, pelo Kong ([09-testes.md](09-testes.md)) |
+| 14. Diagnóstico (em falha) | Pods de todos os namespaces, eventos, logs da API, logs do Kong (`kubectl -n gateway logs deployment/kong`) e pods do ns `observabilidade` (os logs do Keycloak são diagnosticados no repositório de identidade) | — |
+| 15. Resumo | `$GITHUB_STEP_SUMMARY`: SHA, imagem, réplicas prontas, resultado e contagem do e2e, URLs locais (API pelo gateway, Grafana, Prometheus, Keycloak) | — |
 
 Se o e2e falhar após o rollout, o job falha (deploy marcado como vermelho) e o autor executa o rollback da seção 6. O rollback não é automático, para preservar o estado para diagnóstico.
 
@@ -266,7 +271,7 @@ Como cada imagem é identificada pelo SHA, voltar uma versão é reimplantar o S
 2. GitHub → Actions → CD → *Run workflow*, informando `ref = <sha-anterior>`. O SHA precisa ser ancestral de `origin/main`; qualquer outra `ref` é recusada no primeiro passo.
 3. O CD faz checkout desse SHA, reaproveita `revenda-api:<sha-anterior>` se a imagem ainda estiver no Docker local (ou a reconstrói), aplica e executa o e2e.
 4. Migração: o Job da versão anterior encontra o banco numa revisão que a imagem dele não conhece (criada pela versão mais nova), **não altera o schema e termina com sucesso**; o rollout segue. Não há `alembic downgrade` automático: a compatibilidade vem da regra *expand/contract* ([06-dados.md](06-dados.md), seção 5.3).
-5. Atenção: o Terraform também é aplicado com a versão daquele SHA; se o PR problemático alterou infraestrutura, a infraestrutura da API também é revertida. O rollback da API não mexe na identidade, que tem rollback próprio no repositório dela. Um SHA anterior à separação ([ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md)) é recusado pelo CD (o passo de validação falha se o commit ainda tiver `infra/terraform/keycloak.tf` ou `keycloak/`): o Terraform dele declarava o Keycloak e usava o state `terraform.tfstate`.
+5. Atenção: o Terraform também é aplicado com a versão daquele SHA; se o PR problemático alterou infraestrutura, a infraestrutura da API também é revertida. O rollback da API não mexe na identidade, que tem rollback próprio no repositório dela. Um SHA anterior ao API Gateway ([ADR-015](adrs/ADR-015-api-gateway-kong.md)) remove o Kong, o Prometheus e o Grafana e devolve o NodePort 30080 ao Service `revenda-api`; para voltar depois a um SHA com o gateway, o Service `revenda-api` precisa deixar de ocupar a porta 30080 antes do `terraform apply` (`kubectl -n revenda delete service revenda-api`; o CD recria o Service como ClusterIP no passo de deploy), senão a criação do Service `kong` falha com a porta já alocada. Um SHA anterior à separação ([ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md)) é recusado pelo CD (o passo de validação falha se o commit ainda tiver `infra/terraform/keycloak.tf` ou `keycloak/`): o Terraform dele declarava o Keycloak e usava o state `terraform.tfstate`.
 
 **B. Emergencial no cluster**
 

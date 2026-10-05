@@ -1,4 +1,5 @@
-# Publicado no host por extraPortMappings do kind: localhost:8080 -> NodePort 30080.
+# So dentro do cluster (ClusterIP). A entrada pelo host e o API Gateway (Kong, ADR-015):
+# localhost:8080 -> NodePort 30080 -> Kong (namespace gateway) -> este Service.
 apiVersion: v1
 kind: Service
 metadata:
@@ -8,12 +9,11 @@ metadata:
     app.kubernetes.io/name: revenda-api
     app.kubernetes.io/part-of: revenda-veiculos
 spec:
-  type: NodePort
+  type: ClusterIP
   selector:
     app: revenda-api
   ports:
     - name: http
       port: 80
       targetPort: http
-      nodePort: 30080
       protocol: TCP

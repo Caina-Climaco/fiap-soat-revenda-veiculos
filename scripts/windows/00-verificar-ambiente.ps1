@@ -42,8 +42,8 @@ $linhas += "user.email=$(git config --global user.email)"
 $linhas += "credential.helper=$(git config --global credential.helper)"
 $linhas += "---- gh auth"
 $linhas += (gh auth status 2>&1 | Select-Object -First 6)
-$linhas += "---- portas em uso (8080, 8180, 15432)"
-$linhas += (Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -in 8080,8180,15432 } | ForEach-Object { "porta $($_.LocalPort) PID $($_.OwningProcess) $((Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName)" })
+$linhas += "---- portas em uso (8080, 8180, 15432, 3000, 9090)"
+$linhas += (Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue | Where-Object { $_.LocalPort -in 8080,8180,15432,3000,9090 } | ForEach-Object { "porta $($_.LocalPort) PID $($_.OwningProcess) $((Get-Process -Id $_.OwningProcess -ErrorAction SilentlyContinue).ProcessName)" })
 
 $linhas | Out-File -Encoding utf8 $saida
 $linhas

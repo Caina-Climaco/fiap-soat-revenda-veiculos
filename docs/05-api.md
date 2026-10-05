@@ -6,7 +6,7 @@ Este documento é o contrato HTTP da `revenda-api`: convenções gerais, autenti
 
 | Item | Convenção |
 |---|---|
-| Base URL (local) | `http://localhost:8080` |
+| Base URL (local) | `http://localhost:8080`. No ambiente kind é o **API Gateway (Kong)**, que encaminha só as rotas publicadas (ver 1.3); no docker compose de desenvolvimento é a própria API |
 | Prefixo de versão | `/api/v1` para todos os recursos de negócio. Os endpoints de saúde (`/health/*`) ficam fora do prefixo |
 | Formato | `application/json; charset=utf-8` em requisições e respostas de sucesso; `application/problem+json` em erros |
 | Nomes de campos | `snake_case`, em português sem acento, alinhados à linguagem ubíqua (`preco_venda`, `codigo_pagamento`) |
@@ -16,7 +16,7 @@ Este documento é o contrato HTTP da `revenda-api`: convenções gerais, autenti
 | Enums | Texto em maiúsculas: `A_VENDA`, `RESERVADO`, `VENDIDO`, `AGUARDANDO_PAGAMENTO`, `EFETIVADA`, `CANCELADA` |
 | Campos nulos | Campos opcionais sem valor são retornados como `null` (não são omitidos) |
 | Criação | `201 Created` com header `Location` apontando para o recurso criado |
-| Correlação | Header opcional `X-Request-ID`; se ausente, a API gera um UUID e o devolve na resposta e nos logs |
+| Correlação | Header opcional `X-Request-ID`; se ausente, o Kong (ou, sem gateway, a API) gera um UUID e o devolve na resposta; a API registra o mesmo valor nos logs |
 
 ### 1.1 Paginação
 
@@ -32,6 +32,25 @@ As listagens aceitam `limite` (padrão 20, mínimo 1, máximo 100) e `deslocamen
 ```
 
 `total` é a quantidade de itens que satisfazem o filtro, independentemente da página.
+
+### 1.3 API Gateway (ambiente kind)
+
+No ambiente kind, toda requisição passa pelo Kong antes de chegar à API ([ADR-015](adrs/ADR-015-api-gateway-kong.md)). O contrato dos endpoints não muda; o gateway acrescenta regras de borda:
+
+| Rota do Kong | Caminhos | Regra na borda |
+|---|---|---|
+| `api` | `/api/v1/*` (todos os métodos) | *Rate limiting* de 600 requisições por minuto por IP |
+| `compra` | `POST /api/v1/vendas` | *Rate limiting* de 60 requisições por minuto por IP |
+| `webhook-pagamento` | `POST /api/v1/pagamentos/webhook` | key-auth pelo header `X-Webhook-Secret` + ACL (só o consumer `gateway-pagamento`) |
+| `documentacao` | `GET /docs`, `GET /openapi.json` | — |
+| `saude` | `GET /health/*` | — |
+
+- **Cabeçalhos de limite**: as respostas das rotas `api` e `compra` trazem `RateLimit-Limit`, `RateLimit-Remaining` e `RateLimit-Reset` (e os equivalentes `X-RateLimit-Limit-Minute` e `X-RateLimit-Remaining-Minute`). Acima do limite, o próprio Kong responde **429** com `{"message": "API rate limit exceeded"}` e o cabeçalho `Retry-After`; a requisição não chega à API.
+- **Payload**: corpo acima de 1 MB → **413** do Kong.
+- **Caminho sem rota** (por exemplo, `/metrics`) → **404** do Kong, `{"message": "no Route matched with those values"}`.
+- **Webhook sem credencial válida** → **401** do Kong, antes da API (ver 4.13).
+- As respostas de erro geradas pelo Kong são JSON com o membro `message`, **não** `application/problem+json`; elas se distinguem por não trazerem o cabeçalho `X-Kong-Upstream-Latency` (presente quando a resposta veio da API). O cabeçalho `Via` identifica o gateway.
+- O JWT **não** é validado no Kong: os 401 `nao-autenticado` e 403 `acesso-negado` continuam vindo da API, em `problem+json`.
 
 ### 1.2 Erros (RFC 9457, `application/problem+json`)
 
@@ -74,7 +93,7 @@ Catálogo de tipos de problema:
 |---|---|---|
 | `requisicao-malformada` | 400 | JSON inválido ou corpo ilegível |
 | `nao-autenticado` | 401 | Token ausente, expirado, com assinatura inválida, `iss`/`aud`/`azp` incorretos |
-| `webhook-nao-autorizado` | 401 | `X-Webhook-Secret` ausente ou incorreto |
+| `webhook-nao-autorizado` | 401 | `X-Webhook-Secret` ausente ou incorreto (no ambiente kind, só quando a credencial passa pelo Kong mas não confere na API; normalmente o 401 vem do próprio Kong, ver 1.3) |
 | `acesso-negado` | 403 | Token válido, mas sem o papel exigido |
 | `veiculo-nao-encontrado` | 404 | Veículo inexistente |
 | `venda-nao-encontrada` | 404 | Venda inexistente, ou existente mas pertencente a outro comprador |
@@ -189,7 +208,7 @@ Resumo:
 |---|---|---|---|
 | GET | `/health/live` | público | 200 |
 | GET | `/health/ready` | público | 200 / 503 |
-| GET | `/metrics` | público no ambiente local (ver 4.14) | 200 |
+| GET | `/metrics` | só dentro do cluster (Prometheus); 404 pelo gateway (ver 4.14) | 200 |
 | POST | `/api/v1/veiculos` | gestor | 201 |
 | PATCH | `/api/v1/veiculos/{id}` | gestor | 200 |
 | GET | `/api/v1/veiculos/{id}` | público | 200 |
@@ -200,7 +219,9 @@ Resumo:
 | GET | `/api/v1/vendas/{id}` | dono (cliente) ou gestor | 200 |
 | GET | `/api/v1/vendas` | gestor | 200 |
 | POST | `/api/v1/vendas/{id}/cancelar` | dono (cliente) ou gestor | 200 |
-| POST | `/api/v1/pagamentos/webhook` | gateway (`X-Webhook-Secret`) | 200 |
+| POST | `/api/v1/pagamentos/webhook` | gateway de pagamento (`X-Webhook-Secret`, conferido no Kong e na API) | 200 |
+
+No ambiente kind, qualquer rota de `/api/v1` pode responder **429** do Kong quando o limite por IP é excedido (ver 1.3).
 
 ### 4.1 `GET /health/live`
 
@@ -578,7 +599,7 @@ Se a reserva já estiver vencida no momento do cancelamento, a venda é cancelad
 
 ### 4.13 `POST /api/v1/pagamentos/webhook` — notificação do gateway
 
-Chamador: **gateway de pagamento** (simulado por Swagger UI ou curl). Não usa JWT; a autenticação é o segredo compartilhado no header `X-Webhook-Secret`, comparado em tempo constante com o valor do Secret `revenda-webhook-secret`. O endpoint é a camada anticorrupção de Vendas: traduz o payload do gateway em `ProcessarPagamento(codigo, aprovado)`.
+Chamador: **gateway de pagamento** (simulado por Swagger UI ou curl). Não usa JWT; a autenticação é o segredo compartilhado no header `X-Webhook-Secret`. No ambiente kind ela acontece duas vezes: primeiro no Kong (key-auth: o valor precisa ser a credencial do consumer `gateway-pagamento`, e o plugin ACL só deixa passar esse consumer) e depois na API, que compara em tempo constante com o valor do Secret `revenda-webhook-secret` (o mesmo segredo; defesa em profundidade). O endpoint é a camada anticorrupção de Vendas: traduz o payload do gateway em `ProcessarPagamento(codigo, aprovado)`.
 
 Headers:
 
@@ -630,7 +651,8 @@ Comportamento por estado da venda:
 
 | Código | Quando |
 |---|---|
-| 401 `webhook-nao-autorizado` | Header ausente ou segredo incorreto |
+| 401 | Header ausente ou segredo incorreto. Pelo gateway, a resposta vem do Kong (`{"message": ...}`, sem `X-Kong-Upstream-Latency`) e a API nem é chamada; sem gateway (docker compose), vem da API como `problem+json` `webhook-nao-autorizado` |
+| 429 | Limite de taxa da rota `/api/v1` excedido (Kong) |
 | 404 `pagamento-nao-encontrado` | `codigo_pagamento` desconhecido |
 | 409 | Conforme a tabela acima |
 | 422 | Payload fora do formato |
@@ -639,7 +661,9 @@ Em uma integração real, o gateway reenviaria notificações sem resposta 2xx; 
 
 ### 4.14 `GET /metrics`: métricas Prometheus
 
-Papel: **público** no ambiente local (como `/health/*`, fica fora do prefixo `/api/v1` e não aparece no OpenAPI). Responde no formato de exposição de texto do Prometheus (`text/plain; version=0.0.4`). Não contém dados pessoais nem identificadores: só contagens e latências agregadas. Em produção, o acesso deve ficar restrito à rede interna do cluster.
+Acesso: **só dentro do cluster**. O endpoint fica fora do prefixo `/api/v1` e não aparece no OpenAPI; no ambiente kind, o Kong não tem rota para ele (`http://localhost:8080/metrics` responde **404 do Kong**), o Service da API é ClusterIP e a NetworkPolicy `revenda-api-somente-gateway` só deixa o Prometheus (e o Kong) chegarem à porta 8000. O Prometheus do namespace `observabilidade` coleta cada réplica pelas anotações `prometheus.io/*` do pod. Para ver o texto bruto de uma réplica: `kubectl -n revenda port-forward deploy/revenda-api 8000:8000` e `curl -s http://localhost:8000/metrics`. No docker compose (sem gateway), continua em `http://localhost:8080/metrics`.
+
+Responde no formato de exposição de texto do Prometheus (`text/plain; version=0.0.4`). Não contém dados pessoais nem identificadores: só contagens e latências agregadas.
 
 | Métrica | Tipo | Rótulos | Significado |
 |---|---|---|---|
@@ -657,4 +681,4 @@ revenda_http_requisicoes_total{metodo="GET",rota="/api/v1/veiculos/a-venda",stat
 revenda_vendas_canceladas_total{motivo="PAGAMENTO_RECUSADO"} 1.0
 ```
 
-Os contadores são por processo (cada réplica tem os seus); a soma entre réplicas é feita pelo Prometheus. Uso, golden signals, SLOs e alertas propostos estão em [12-observabilidade.md](12-observabilidade.md).
+Os contadores são por processo (cada réplica tem os seus); a soma entre réplicas é feita pelo Prometheus. Uso, painel do Grafana, golden signals, SLOs e alertas estão em [12-observabilidade.md](12-observabilidade.md).

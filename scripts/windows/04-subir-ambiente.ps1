@@ -125,6 +125,16 @@ Write-Host "Servico de identidade OK: http://localhost:8180/realms/revenda"
 $codigo = Invocar "terraform" @("-chdir=$tfDir", "init", "-input=false", "-no-color", "-reconfigure", "-backend-config=path=$statePath")
 if ($codigo -ne 0) { Falhar "terraform init falhou (codigo $codigo)." }
 
+# Antes do API Gateway o Service revenda-api era NodePort 30080; o Kong assume essa porta.
+$tipoSvc = (& kubectl -n revenda get service revenda-api -o "jsonpath={.spec.type}" 2>$null)
+if ($tipoSvc -eq "NodePort") {
+    Write-Host "Service revenda-api ainda e NodePort: convertendo para ClusterIP (libera a 30080 para o Kong)"
+    $patch = '[{"op":"replace","path":"/spec/type","value":"ClusterIP"},{"op":"remove","path":"/spec/ports/0/nodePort"}]'
+    $arq = Join-Path $env:TEMP "revenda-svc-patch.json"
+    [IO.File]::WriteAllText($arq, $patch)
+    $null = Invocar "kubectl" @("-n", "revenda", "patch", "service", "revenda-api", "--type=json", "--patch-file=$arq")
+}
+
 $codigo = Invocar "terraform" @("-chdir=$tfDir", "apply", "-input=false", "-no-color", "-auto-approve")
 if ($codigo -ne 0) { Falhar "terraform apply falhou (codigo $codigo). Diagnostico: kubectl get pods -A" }
 
@@ -136,13 +146,16 @@ $null = Invocar "terraform" @("-chdir=$tfDir", "output", "-no-color", "urls")
 
 Write-Host ""
 Write-Host "==================== infraestrutura da API ===================="
-Write-Host "API (apos o CD)      http://localhost:8080   (Swagger: http://localhost:8080/docs)"
+Write-Host "API pelo Kong (CD)   http://localhost:8080   (Swagger: http://localhost:8080/docs)"
+Write-Host "Grafana              http://localhost:3000   (painel Revenda de Veiculos; anonimo como Viewer)"
+Write-Host "Prometheus           http://localhost:9090   (alvos em /targets, alertas em /alerts)"
 Write-Host "Identidade           http://localhost:8180   (outro repositorio: fiap-soat-revenda-identidade)"
 if (-not $SemBancoExposto) { Write-Host "Banco revenda        localhost:15432 (usuario revenda, banco revenda)" }
 Write-Host ""
 Write-Host "Segredos da API (PowerShell): ler e decodificar, por exemplo o segredo do webhook:"
 Write-Host '  $b = kubectl -n revenda get secret revenda-webhook-secret -o jsonpath="{.data.WEBHOOK_SECRET}"'
 Write-Host '  [Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($b))'
+Write-Host "Senha do admin do Grafana: o mesmo comando com -n observabilidade, secret grafana-admin, chave GF_SECURITY_ADMIN_PASSWORD"
 Write-Host ""
 Write-Host "Aplicacao: merge na main ou  gh workflow run cd.yml  (CD no runner kind-local)."
 Write-Host "Log: $log"

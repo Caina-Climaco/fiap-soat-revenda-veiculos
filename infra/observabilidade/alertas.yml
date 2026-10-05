@@ -1,0 +1,88 @@
+# Regras de alerta (docs/12-observabilidade.md, secao 12.4), avaliadas pelo Prometheus.
+# Sem Alertmanager no ambiente local: os alertas aparecem em http://localhost:9090/alerts e
+# no painel do Grafana. Em producao, o Alertmanager enviaria para o canal da equipe.
+groups:
+  - name: revenda-api
+    rules:
+      - alert: RevendaApiFora
+        expr: up{job="revenda-api"} == 0 or absent(up{job="revenda-api"})
+        for: 2m
+        labels:
+          severidade: critica
+        annotations:
+          resumo: "revenda-api sem coleta de metricas"
+          acao: "Ver pods, eventos e kubectl -n revenda rollout status deployment/revenda-api"
+
+      - alert: RevendaErros5xxAltos
+        expr: |
+          sum(rate(revenda_http_requisicoes_total{status=~"5.."}[5m]))
+            / clamp_min(sum(rate(revenda_http_requisicoes_total[5m])), 1e-9) > 0.01
+        for: 5m
+        labels:
+          severidade: critica
+        annotations:
+          resumo: "Mais de 1% de respostas 5xx na API"
+          acao: "Logs nivel=ERROR por request_id; rollback se coincidir com deploy"
+
+      - alert: RevendaListagensLentas
+        expr: |
+          histogram_quantile(0.95, sum by (le) (rate(
+            revenda_http_requisicao_duracao_segundos_bucket{rota=~"/api/v1/veiculos/(a-venda|vendidos)"}[5m]
+          ))) > 0.3
+        for: 10m
+        labels:
+          severidade: alerta
+        annotations:
+          resumo: "p95 das listagens acima de 300 ms (SLO)"
+          acao: "Ver saturacao (CPU, HPA no maximo) e o banco"
+
+      - alert: RevendaHpaNoMaximo
+        expr: count(up{job="revenda-api"} == 1) >= 5
+        for: 15m
+        labels:
+          severidade: alerta
+        annotations:
+          resumo: "API rodando com o maximo de replicas do HPA (5)"
+          acao: "Avaliar maxReplicas, requests e consultas lentas"
+
+      - alert: RevendaWebhookRecusado
+        expr: sum(rate(revenda_http_requisicoes_total{rota="/api/v1/pagamentos/webhook",status="401"}[5m])) > 0.1
+        for: 5m
+        labels:
+          severidade: alerta
+        annotations:
+          resumo: "Webhook de pagamento recusado com frequencia na API"
+          acao: "Possivel tentativa de forjar pagamento; conferir origem e rotacionar o segredo"
+
+  - name: negocio
+    rules:
+      - alert: RevendaRecusasDePagamentoAltas
+        expr: |
+          sum(increase(revenda_vendas_canceladas_total{motivo="PAGAMENTO_RECUSADO"}[1h]))
+            / clamp_min(sum(increase(revenda_vendas_iniciadas_total[1h])), 1) > 0.3
+        for: 30m
+        labels:
+          severidade: informativa
+        annotations:
+          resumo: "Mais de 30% das compras com pagamento recusado"
+          acao: "Falar com o gateway de pagamento"
+
+  - name: gateway
+    rules:
+      - alert: KongFora
+        expr: up{job="kong"} == 0 or absent(up{job="kong"})
+        for: 2m
+        labels:
+          severidade: critica
+        annotations:
+          resumo: "API Gateway (Kong) sem coleta de metricas"
+          acao: "kubectl -n gateway get pods; kubectl -n gateway logs deployment/kong"
+
+      - alert: KongRejeicoesNaBorda
+        expr: sum(rate(kong_http_requests_total{code=~"401|403|429"}[5m])) > 0.5
+        for: 5m
+        labels:
+          severidade: alerta
+        annotations:
+          resumo: "Muitas requisicoes barradas no gateway (credencial invalida ou limite de taxa)"
+          acao: "Conferir origem no log do Kong; possivel abuso"
