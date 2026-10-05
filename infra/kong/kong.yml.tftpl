@@ -1,0 +1,100 @@
+# Configuracao declarativa do Kong (modo DB-less, ADR-015). Renderizada pelo Terraform
+# (infra/terraform/gateway.tf) e entregue ao pod como Secret, porque contem a credencial do
+# consumer gateway-pagamento. Para validar sem o cluster:
+#   docker run --rm -v "$PWD/infra/kong:/k" -e KONG_DATABASE=off kong:3.9.3 kong config parse /k/kong.yml
+# (depois de trocar o placeholder da credencial; o CI faz isso).
+#
+# Servico e rotas
+#   revenda-api          upstream = Service revenda-api do namespace revenda (ClusterIP)
+#   api                  /api/v1 (todos os metodos)            rate limiting geral por IP
+#   compra               POST /api/v1/vendas                    rate limiting mais restrito
+#   webhook-pagamento    POST /api/v1/pagamentos/webhook        key-auth + ACL (consumer)
+#   documentacao         GET /docs e /openapi.json              Swagger UI
+#   saude                GET /health/*                          probes externos
+# /metrics NAO tem rota: as metricas da API so sao lidas dentro do cluster (Prometheus).
+_format_version: "3.0"
+_transform: true
+
+services:
+  - name: revenda-api
+    url: http://revenda-api.revenda.svc.cluster.local:80
+    connect_timeout: 5000
+    read_timeout: 30000
+    write_timeout: 30000
+    retries: 2
+    routes:
+      - name: api
+        paths: ["/api/v1"]
+        strip_path: false
+        plugins:
+          - name: rate-limiting
+            config:
+              minute: ${limite_geral_minuto}
+              policy: local
+              limit_by: ip
+      - name: compra
+        paths: ["/api/v1/vendas"]
+        methods: ["POST"]
+        strip_path: false
+        plugins:
+          - name: rate-limiting
+            config:
+              minute: ${limite_compra_minuto}
+              policy: local
+              limit_by: ip
+      - name: webhook-pagamento
+        paths: ["/api/v1/pagamentos/webhook"]
+        methods: ["POST"]
+        strip_path: false
+        plugins:
+          # O gateway de pagamento se identifica pela credencial no header X-Webhook-Secret.
+          # hide_credentials=false: a API recebe o header e valida de novo (defesa em
+          # profundidade, ADR-007).
+          - name: key-auth
+            config:
+              key_names: ["X-Webhook-Secret"]
+              key_in_header: true
+              key_in_query: false
+              key_in_body: false
+              hide_credentials: false
+          - name: acl
+            config:
+              allow: ["gateway-pagamento"]
+              hide_groups_header: true
+      - name: documentacao
+        paths: ["/docs", "/openapi.json"]
+        methods: ["GET"]
+        strip_path: false
+      - name: saude
+        paths: ["/health/"]
+        methods: ["GET"]
+        strip_path: false
+
+plugins:
+  # Mesmo cabecalho de correlacao da API (X-Request-ID): o Kong gera quando o cliente nao
+  # manda, e a API registra o mesmo valor nos logs.
+  - name: correlation-id
+    config:
+      header_name: X-Request-ID
+      generator: uuid
+      echo_downstream: true
+  - name: request-size-limiting
+    config:
+      allowed_payload_size: 1
+      size_unit: megabytes
+  # Metricas do gateway em :8100/metrics (status listener), coletadas pelo Prometheus.
+  - name: prometheus
+    config:
+      status_code_metrics: true
+      latency_metrics: true
+      bandwidth_metrics: true
+      upstream_health_metrics: true
+      per_consumer: true
+
+consumers:
+  - username: gateway-pagamento
+    custom_id: gateway-pagamento-simulado
+    keyauth_credentials:
+      - key: "${webhook_secret}"
+    acls:
+      - group: gateway-pagamento

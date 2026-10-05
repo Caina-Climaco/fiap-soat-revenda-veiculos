@@ -47,7 +47,7 @@ def test_e2e_bdd05_gestor_nao_compra(api, gestor, preco, execucao):
     ],
 )
 def test_e2e_bdd07_webhook_com_segredo_invalido_retorna_401(
-    api, gestor, cliente_a, preco, execucao, rotulo, headers
+    api, gestor, cliente_a, preco, execucao, rotulo, headers, via_gateway
 ):
     veiculo = api.cadastrar_veiculo(
         gestor, preco(47000), marca="Hyundai", modelo=f"HB20 [e2e {execucao} {rotulo}]", cor="Azul"
@@ -55,7 +55,13 @@ def test_e2e_bdd07_webhook_com_segredo_invalido_retorna_401(
     venda = api.comprar_ok(cliente_a, veiculo["id"])
 
     resposta = api.webhook(venda["codigo_pagamento"], "APROVADO", headers=headers)
-    api.assert_problema(resposta, 401, "webhook-nao-autorizado")
+    if via_gateway:
+        # Com o API Gateway, o webhook sem a credencial do consumer gateway-pagamento e
+        # barrado na borda (key-auth) e nem chega a API; a API valida de novo o segredo
+        # quando o Kong deixa passar (defesa em profundidade, coberta nos testes de integracao).
+        api.barrado_no_gateway(resposta, 401)
+    else:
+        api.assert_problema(resposta, 401, "webhook-nao-autorizado")
 
     consultada = api.assert_status(api.venda(cliente_a, venda["id"]), 200)
     assert consultada["status"] == "AGUARDANDO_PAGAMENTO"

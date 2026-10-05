@@ -1,16 +1,18 @@
 # 12. Observabilidade
 
-Este documento descreve o que a `revenda-api` oferece hoje para ser observada (logs, probes, métricas Prometheus e métricas de recursos), como os quatro *golden signals* se mapeiam para essas métricas, os SLIs/SLOs e alertas propostos e como plugar um APM (New Relic ou Datadog) sem mudar o código de negócio. A decisão está no [ADR-012](adrs/ADR-012-observabilidade-prometheus.md); o contrato do endpoint `/metrics` está em [05-api.md](05-api.md), seção 4.14.
+Este documento descreve o que a `revenda-api` e o API Gateway oferecem para serem observados (logs, probes, métricas Prometheus e métricas de recursos), o monitoramento instalado no cluster (Prometheus e Grafana, com painel e alertas versionados), como os quatro *golden signals* se mapeiam para essas métricas, os SLIs/SLOs, os alertas ativos e como plugar um APM (New Relic ou Datadog) sem mudar o código de negócio. As decisões estão no [ADR-012](adrs/ADR-012-observabilidade-prometheus.md) (métricas na API) e no [ADR-016](adrs/ADR-016-prometheus-grafana.md) (Prometheus e Grafana); o contrato do endpoint `/metrics` está em [05-api.md](05-api.md), seção 4.14.
 
 ## 12.1 O que existe
 
 | Sinal | Como | Onde ver |
 |---|---|---|
 | **Logs** | JSON em stdout, uma linha por evento: `ts`, `nivel`, `logger`, `mensagem`, `request_id` e campos do evento. O middleware registra cada requisição com `metodo`, `rota` (template), `status`, `latencia_ms` e, se autenticada, `sub` (pseudônimo). Eventos de domínio (`CompraIniciada`, `VendaEfetivada`, `VendaCancelada` etc.) também viram linhas de log | `kubectl -n revenda logs deployment/revenda-api`; `docker compose logs api` |
-| **Correlação** | Header `X-Request-ID` aceito (se bem formado) ou gerado; devolvido na resposta, presente em todas as linhas de log da requisição e no corpo dos erros `problem+json` | Header da resposta e campo `request_id` |
+| **Correlação** | Header `X-Request-ID` gerado pelo Kong quando ausente (plugin `correlation-id`) e repassado à API, que o aceita (se bem formado) ou gera; devolvido na resposta, presente no log de acesso do Kong, em todas as linhas de log da requisição na API e no corpo dos erros `problem+json` | Header da resposta e campo `request_id` |
 | **Privacidade nos logs** | Nunca são registrados tokens, `Authorization`, `X-Webhook-Secret`, senhas nem dados pessoais; o SQLAlchemy usa `hide_parameters=True` (erros de banco sem valores de parâmetros); respostas 5xx saem em nível `ERROR`, 401 e 403 em `WARNING` (possível abuso) e o restante em `INFO` | [07-seguranca-lgpd.md](07-seguranca-lgpd.md), seção 3.9 |
 | **Probes** | `GET /health/live` (processo vivo) e `GET /health/ready` (`SELECT 1` no banco); usadas por `startupProbe`, `livenessProbe` e `readinessProbe` | [08-ci-cd-infra.md](08-ci-cd-infra.md), seção 2.2 |
-| **Métricas da aplicação** | `GET /metrics` no formato Prometheus, na mesma porta da API (8000 no pod, 8080 no host). Pods anotados com `prometheus.io/scrape: "true"`, `prometheus.io/port: "8000"` e `prometheus.io/path: /metrics` | Seção 12.5 |
+| **Métricas da aplicação** | `GET /metrics` no formato Prometheus, na porta 8000 do pod, **só dentro do cluster** (o Kong não tem rota para ele: `http://localhost:8080/metrics` responde 404). Pods anotados com `prometheus.io/scrape: "true"`, `prometheus.io/port: "8000"` e `prometheus.io/path: /metrics`, coletados pelo Prometheus | Grafana e Prometheus (seção 12.5) |
+| **Métricas do API Gateway** | Plugin `prometheus` do Kong no *status listener* (`:8100/metrics`): `kong_http_requests_total` (por `route` e `code`), histogramas `kong_request_latency_ms`, `kong_upstream_latency_ms` e `kong_kong_latency_ms`, largura de banda e saúde do *upstream* | Grafana (linha "API Gateway (Kong)") e Prometheus |
+| **Logs do gateway** | Log de acesso do Kong em stdout, com o `X-Request-ID` | `kubectl -n gateway logs deployment/kong` |
 | **Métricas de recursos** | metrics-server (Helm, via Terraform): CPU e memória por pod, base do HPA (2..5 réplicas, alvo de 60% de CPU) | `kubectl top pods -n revenda`; `kubectl -n revenda get hpa` |
 
 Métricas expostas em `/metrics`:
@@ -26,7 +28,26 @@ Métricas expostas em `/metrics`:
 
 O rótulo `rota` é o template da rota (ex.: `/api/v1/vendas/{venda_id}`), nunca o caminho com o UUID; caminhos que não correspondem a nenhuma rota (404) usam o valor fixo `nao_mapeada`. A cardinalidade fica limitada ao número de rotas. Além das séries da aplicação, o endpoint traz as métricas padrão do processo Python (`process_*`, `python_*`: CPU, memória, descritores de arquivo, coleta de lixo). Os contadores de negócio são alimentados pelos eventos de domínio publicados **depois do commit**, então só contam fatos confirmados. Nenhuma métrica carrega `sub`, identificador de venda ou de veículo.
 
-O que **não** existe nesta entrega: Prometheus, Grafana, Alertmanager ou agente de APM no cluster. As consultas e os alertas abaixo são propostas prontas para quando um coletor for instalado.
+### 12.1.1 Monitoramento instalado no cluster
+
+Implantado pelo Terraform deste repositório (`infra/terraform/observabilidade.tf`) no namespace `observabilidade` ([ADR-016](adrs/ADR-016-prometheus-grafana.md)):
+
+| Componente | Configuração | Acesso |
+|---|---|---|
+| **Prometheus** 3.14.0 | `infra/observabilidade/prometheus.yml`: *scrape* a cada 15 s; jobs `prometheus`, `revenda-api` (descoberta de pods no ns `revenda`, uma série por réplica, pelas anotações `prometheus.io/*`) e `kong` (pods do ns `gateway`, porta 8100). Permissão: Roles de leitura de pods só em `revenda` e `gateway`. Regras em `alertas.yml`. Retenção de 2 dias em `emptyDir` (os dados somem quando o pod reinicia) | http://localhost:9090 (NodePort 30900); alertas em http://localhost:9090/alerts |
+| **Grafana** 13.2.3 | Fonte de dados `Prometheus` (uid `prometheus`) e painel provisionados por arquivo (`infra/observabilidade/grafana/`), pasta "Revenda"; o painel é a página inicial e não pode ser alterado pela interface. Acesso anônimo como Viewer; admin `admin` com senha aleatória no Secret `observabilidade/grafana-admin` | http://localhost:3000 (NodePort 30300) |
+| **Alertmanager** | Não instalado: os alertas não notificam ninguém, aparecem no Prometheus e no painel | — |
+| **APM** | Não instalado (evolução, seção 12.6) | — |
+
+**Painel "Revenda de Veículos — visão geral"** (uid `revenda-visao-geral`, `infra/observabilidade/grafana/painel-revenda.json`):
+
+| Linha | Painéis |
+|---|---|
+| Negócio (contadores de domínio da API) | Vendas iniciadas, Vendas efetivadas, Vendas canceladas, Veículos cadastrados, Réplicas da API, Alertas disparando |
+| API (golden signals) | Tráfego por rota (req/s), Latência p95 por rota, Respostas por status |
+| API Gateway (Kong) | Requisições por rota do Kong, Barradas na borda (401, 403, 429), Latência no Kong (p95: total, *upstream* e do próprio Kong) |
+
+O CD confere, a cada deploy, que o Prometheus tem alvos `up` dos jobs `revenda-api` e `kong`, que os 3 grupos de regras foram carregados e que o Grafana responde com o painel ([08-ci-cd-infra.md](08-ci-cd-infra.md), seção 3.3). No docker compose de desenvolvimento não há Prometheus nem Grafana: lá, `/metrics` é lido direto em `http://localhost:8080/metrics`.
 
 ## 12.2 Golden signals
 
@@ -35,7 +56,15 @@ O que **não** existe nesta entrega: Prometheus, Grafana, Alertmanager ou agente
 | **Latência** | `revenda_http_requisicao_duracao_segundos` | `histogram_quantile(0.95, sum by (le, rota) (rate(revenda_http_requisicao_duracao_segundos_bucket[5m])))` |
 | **Tráfego** | `revenda_http_requisicoes_total` | `sum by (rota) (rate(revenda_http_requisicoes_total[5m]))` |
 | **Erros** | `revenda_http_requisicoes_total{status=~"5.."}` | `sum(rate(revenda_http_requisicoes_total{status=~"5.."}[5m])) / sum(rate(revenda_http_requisicoes_total[5m]))` |
-| **Saturação** | CPU e memória (metrics-server), réplicas do HPA | `kubectl top pods`; réplicas atuais × `maxReplicas` (5); com Prometheus e cAdvisor/kube-state-metrics: `container_cpu_usage_seconds_total`, `kube_horizontalpodautoscaler_status_current_replicas` |
+| **Saturação** | CPU e memória (metrics-server), réplicas do HPA | `count(up{job="revenda-api"} == 1)` (réplicas coletadas, × `maxReplicas` 5); `kubectl top pods`. Sem cAdvisor/kube-state-metrics no Prometheus local, `container_cpu_usage_seconds_total` e `kube_horizontalpodautoscaler_status_current_replicas` ficam como evolução |
+
+No API Gateway:
+
+| Sinal | Consulta PromQL |
+|---|---|
+| Tráfego por rota do Kong | `sum by (route) (rate(kong_http_requests_total[5m]))` |
+| Barradas na borda | `sum by (code) (rate(kong_http_requests_total{code=~"401|403|429"}[5m]))` |
+| Latência p95 total e do *upstream* | `histogram_quantile(0.95, sum by (le) (rate(kong_request_latency_ms_bucket[5m])))` e o mesmo com `kong_upstream_latency_ms_bucket` |
 
 Sinais de negócio, a partir dos contadores de domínio:
 
@@ -61,60 +90,64 @@ Janela de avaliação: 28 dias corridos. Requisições a `/health/*` e `/metrics
 
 Os números partem do RNF-10 ([03-requisitos.md](03-requisitos.md)), verificado com o k6 (`tests/carga/listagens.js`: p95 < 300 ms e erro < 1% com 20 usuários virtuais). Num ambiente de um nó no PC do autor, o SLO de disponibilidade é uma meta de referência para produção, não um compromisso do ambiente local.
 
-## 12.4 Alertas propostos
+## 12.4 Alertas
 
-Regras no formato do Prometheus/Alertmanager (ou monitores equivalentes no APM):
+As regras **ativas** estão em `infra/observabilidade/alertas.yml`, em três grupos (`revenda-api`, `negocio`, `gateway`), são avaliadas pelo Prometheus do cluster a cada 15 s e têm testes de unidade (`infra/observabilidade/alertas.test.yml`, `promtool test rules` no CI; ver [09-testes.md](09-testes.md), seção 9.5.11). As marcadas como *proposta* ainda não foram implementadas.
 
 | Alerta | Expressão | Por | Severidade | Ação |
 |---|---|---|---|---|
-| `RevendaApiFora` | `up{job="revenda-api"} == 0` (alvo sem scrape) | 2 min | crítica | Ver pods, eventos e `rollout status` |
+| `RevendaApiFora` | `up{job="revenda-api"} == 0 or absent(up{job="revenda-api"})` (alvo sem scrape) | 2 min | crítica | Ver pods, eventos e `rollout status` |
 | `RevendaErros5xxAltos` | Taxa de 5xx da seção 12.2 `> 0.01` | 5 min | crítica | Logs `nivel=ERROR` por `request_id`; rollback se coincidir com deploy |
 | `RevendaListagensLentas` | p95 das listagens `> 0.3` s | 10 min | alerta | Ver saturação (CPU, HPA no máximo) e o banco |
-| `RevendaOrcamentoQueimandoRapido` | Consumo do orçamento de erro de disponibilidade 14 vezes acima do sustentável em 1 h e em 5 min (*burn rate* multijanela) | — | crítica | Tratar como incidente |
-| `RevendaHpaNoMaximo` | Réplicas atuais = 5 | 15 min | alerta | Avaliar `maxReplicas`, *requests* e consultas lentas |
+| `RevendaOrcamentoQueimandoRapido` (*proposta*) | Consumo do orçamento de erro de disponibilidade 14 vezes acima do sustentável em 1 h e em 5 min (*burn rate* multijanela) | — | crítica | Tratar como incidente |
+| `RevendaHpaNoMaximo` | `count(up{job="revenda-api"} == 1) >= 5` (réplicas coletadas no máximo do HPA) | 15 min | alerta | Avaliar `maxReplicas`, *requests* e consultas lentas |
 | `RevendaWebhookRecusado` | `sum(rate(revenda_http_requisicoes_total{rota="/api/v1/pagamentos/webhook",status="401"}[5m])) > 0.1` | 5 min | alerta | Possível tentativa de forjar pagamento; conferir origem e rotacionar o segredo |
-| `RevendaRecusasDePagamentoAltas` | `increase(revenda_vendas_canceladas_total{motivo="PAGAMENTO_RECUSADO"}[1h]) / increase(revenda_vendas_iniciadas_total[1h]) > 0.3` | 30 min | informativa | Falar com o gateway de pagamento |
-| `RevendaReservasExpirandoMuito` | Mesma razão com `motivo="RESERVA_EXPIRADA"` `> 0.5` | 1 h | informativa | Avaliar TTL da reserva e o fluxo de pagamento |
+| `RevendaRecusasDePagamentoAltas` | `sum(increase(revenda_vendas_canceladas_total{motivo="PAGAMENTO_RECUSADO"}[1h])) / clamp_min(sum(increase(revenda_vendas_iniciadas_total[1h])), 1) > 0.3` | 30 min | informativa | Falar com o gateway de pagamento |
+| `RevendaReservasExpirandoMuito` (*proposta*) | Mesma razão com `motivo="RESERVA_EXPIRADA"` `> 0.5` | 1 h | informativa | Avaliar TTL da reserva e o fluxo de pagamento |
+| `KongFora` | `up{job="kong"} == 0 or absent(up{job="kong"})` | 2 min | crítica | `kubectl -n gateway get pods`; `kubectl -n gateway logs deployment/kong` |
+| `KongRejeicoesNaBorda` | `sum(rate(kong_http_requests_total{code=~"401|403|429"}[5m])) > 0.5` | 5 min | alerta | Conferir a origem no log do Kong; possível abuso (credencial inválida no webhook ou excesso de requisições) |
 
-Alertas de negócio não acordam ninguém: viram aviso em canal da equipe.
+Com o gateway, um webhook com credencial errada é barrado no Kong e conta em `KongRejeicoesNaBorda`; `RevendaWebhookRecusado` passa a indicar o caso raro em que a credencial passou pelo Kong mas não conferiu na API (por exemplo, Secrets fora de sincronia).
 
-## 12.5 Como consultar `/metrics` localmente
+Sem Alertmanager, os alertas ativos aparecem em http://localhost:9090/alerts e no painel "Alertas disparando" do Grafana. Em produção, o Alertmanager enviaria os críticos para o plantão e os de negócio para um canal da equipe: alertas de negócio não acordam ninguém.
+
+## 12.5 Como acessar o monitoramento localmente
+
+No ambiente kind (opção B do README):
+
+| O quê | Onde |
+|---|---|
+| Painel | http://localhost:3000 (abre direto em "Revenda de Veículos — visão geral"; leitura anônima) |
+| Consultas PromQL | http://localhost:9090/query, com as consultas da seção 12.2 |
+| Alvos coletados | http://localhost:9090/targets (jobs `revenda-api`, uma linha por réplica, e `kong`) |
+| Alertas | http://localhost:9090/alerts |
+| Admin do Grafana | usuário `admin`; senha: `kubectl -n observabilidade get secret grafana-admin -o jsonpath='{.data.GF_SECURITY_ADMIN_PASSWORD}' \| base64 -d` |
 
 ```bash
-# Pelo Service (cada chamada pode cair numa réplica diferente)
-curl -s http://localhost:8080/metrics | grep '^revenda_'
-
-# Um pod específico, sem passar pelo Service
-kubectl -n revenda get pods -l app=revenda-api
-kubectl -n revenda port-forward pod/<nome-do-pod> 18000:8000
-curl -s http://localhost:18000/metrics | grep revenda_vendas
-
-# Gerar tráfego e ver o histograma andar
+# Gerar tráfego e acompanhar no painel (tráfego, p95, réplicas); veja o aviso sobre o
+# rate limiting do Kong em 09-testes.md, seção 9.6
 k6 run tests/carga/listagens.js
-curl -s http://localhost:8080/metrics | grep 'revenda_http_requisicao_duracao_segundos_bucket{.*a-venda'
+
+# Consulta pela API HTTP do Prometheus (a mesma que o CD usa)
+curl -s --get http://localhost:9090/api/v1/query \
+  --data-urlencode 'query=sum by (rota) (rate(revenda_http_requisicoes_total[5m]))' | jq '.data.result'
+
+# Texto bruto de /metrics de uma réplica (o endpoint não passa pelo gateway)
+kubectl -n revenda port-forward deploy/revenda-api 8000:8000
+curl -s http://localhost:8000/metrics | grep '^revenda_'
+
+# Métricas do Kong
+kubectl -n gateway port-forward deploy/kong 8100:8100
+curl -s http://localhost:8100/metrics | grep '^kong_http_requests_total'
 ```
 
-No docker compose o endereço é o mesmo (`http://localhost:8080/metrics`), com uma única réplica.
+`http://localhost:8080/metrics` responde **404 do Kong**: as métricas da API não são publicadas fora do cluster ([07-seguranca-lgpd.md](07-seguranca-lgpd.md), seção 3.9).
 
-Para experimentar consultas PromQL sem instalar nada no cluster, um Prometheus temporário em container pode raspar a API pelo host (no Docker Desktop, `host.docker.internal`):
-
-```bash
-cat > prometheus.yml <<'YAML'
-scrape_configs:
-  - job_name: revenda-api
-    scrape_interval: 5s
-    static_configs:
-      - targets: ["host.docker.internal:8080"]
-YAML
-docker run --rm -p 9090:9090 -v "$PWD/prometheus.yml:/etc/prometheus/prometheus.yml" prom/prometheus
-# http://localhost:9090 -> consultas da seção 12.2
-```
-
-Nesse modo o Prometheus enxerga só a réplica que o Service escolher a cada scrape; a coleta por pod (via anotações `prometheus.io/*` e descoberta de serviços do Kubernetes) é o modo de produção.
+No docker compose (opção A) não há gateway, Prometheus nem Grafana: `curl -s http://localhost:8080/metrics | grep '^revenda_'` lê direto da única réplica.
 
 ## 12.6 Como plugar um APM (evolução)
 
-A Fase 3 apresentou APMs como New Relic e Datadog. Nenhum deles foi implementado aqui (sem conta e sem custo, ver [ADR-012](adrs/ADR-012-observabilidade-prometheus.md)), mas a aplicação já está preparada para os três caminhos abaixo. Em todos, a chave do APM entra como Secret gerado ou importado pelo Terraform, nunca versionada, e a `versao` do serviço é o SHA da imagem, o que liga cada traço ao deploy.
+A Fase 3 apresentou APMs como New Relic e Datadog. Nenhum deles foi implementado aqui (sem conta e sem custo, ver [ADR-012](adrs/ADR-012-observabilidade-prometheus.md) e [ADR-016](adrs/ADR-016-prometheus-grafana.md)), mas a aplicação já está preparada para os três caminhos abaixo, e o Prometheus do cluster pode continuar como fonte das métricas (os APMs leem o formato Prometheus/OpenMetrics, e o Prometheus pode enviar por *remote write*). Outra evolução, independente do APM, é acrescentar o **Alertmanager** às regras que já existem, para notificar o plantão. Em todos, a chave do APM entra como Secret gerado ou importado pelo Terraform, nunca versionada, e a `versao` do serviço é o SHA da imagem, o que liga cada traço ao deploy.
 
 | Caminho | Como | O que ganha |
 |---|---|---|

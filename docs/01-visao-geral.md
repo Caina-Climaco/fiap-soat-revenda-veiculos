@@ -35,8 +35,9 @@ Entregar uma API REST funcional, testada e implantada de forma automatizada que 
 | Efetivação ou recusa da compra por webhook de gateway de pagamento **simulado** | `POST /api/v1/pagamentos/webhook` com segredo compartilhado |
 | Cancelamento da compra pelo comprador (desistência) ou pela loja | Somente antes da efetivação |
 | Cadastro, login e papéis de usuários no **Keycloak** com PostgreSQL próprio | Realm `revenda`, papéis `cliente` e `gestor`; mantido e implantado pelo repositório de identidade, consumido aqui por contrato (OIDC/JWT) |
-| Infraestrutura local: cluster Kubernetes **kind** criado pela CLI `kind`, com a plataforma provisionada por **Terraform** (aqui: namespace `revenda`, banco da API, segredos, metrics-server; o namespace `identidade` vem do repositório de identidade) | Sem nuvem; cluster local compartilhado pelos dois repositórios |
-| Observabilidade: logs JSON, probes e métricas Prometheus em `/metrics` | Prometheus, Grafana e APM como evolução ([12-observabilidade.md](12-observabilidade.md)) |
+| Infraestrutura local: cluster Kubernetes **kind** criado pela CLI `kind`, com a plataforma provisionada por **Terraform** (aqui: namespaces `revenda`, `gateway` e `observabilidade`: banco da API, segredos, NetworkPolicies, metrics-server, Kong, Prometheus e Grafana; o namespace `identidade` vem do repositório de identidade) | Sem nuvem; cluster local compartilhado pelos dois repositórios |
+| API Gateway **Kong** (DB-less) como única entrada HTTP da API | *Rate limiting* por IP, key-auth + ACL no webhook, `X-Request-ID`, limite de payload; JWT continua validado na API ([ADR-015](adrs/ADR-015-api-gateway-kong.md)) |
+| Observabilidade: logs JSON, probes, métricas Prometheus em `/metrics`, **Prometheus** e **Grafana** no cluster com painel e alertas versionados | Alertas testados com `promtool` no CI; sem Alertmanager; APM como evolução ([12-observabilidade.md](12-observabilidade.md), [ADR-016](adrs/ADR-016-prometheus-grafana.md)) |
 | CI no GitHub Actions (runner hospedado) e CD no runner self-hosted do autor | Deploy automático a cada merge na `main` |
 | Testes de unidade, integração e ponta a ponta (e2e) | Cobertura mínima de 80% |
 | Documentação, README, vídeo e PDF de entrega | Ver [10-plano-execucao.md](10-plano-execucao.md) |
@@ -52,7 +53,8 @@ Entregar uma API REST funcional, testada e implantada de forma automatizada que 
 | Fotos, opcionais, quilometragem e busca com filtros avançados | Não pedidos; o modelo admite extensão futura |
 | Múltiplas lojas ou filiais | Uma única revenda |
 | Notificações (e-mail, SMS, push) | Não pedidas |
-| API Gateway (Kong, APIM) e funções Serverless (Lambda, SAM, Cognito) | Sem conta de nuvem e um único backend; justificativa e onde entrariam em [ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md) |
+| Funções Serverless (Lambda, SAM, Cognito) e API Gateway gerenciado (Azure APIM, AWS API Gateway) | Sem conta de nuvem; Serverless e onde entraria em [ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md); o gateway entregue é o Kong local ([ADR-015](adrs/ADR-015-api-gateway-kong.md)) |
+| APM SaaS (New Relic, Datadog), traços distribuídos e Alertmanager | Exigem conta ou mais componentes; evolução descrita em [12-observabilidade.md](12-observabilidade.md) |
 | Mensageria (broker) e sagas | Eventos de domínio são apenas registrados em log estruturado ([02-modelagem-ddd.md](02-modelagem-ddd.md)) |
 | Nuvem pública, alta disponibilidade multi-nó, backup gerenciado | Restrição de custo; ambiente local |
 | Telas próprias de cadastro além das oferecidas pelo Keycloak | O formulário de registro do realm atende ao cadastro |
@@ -103,6 +105,6 @@ Entregar uma API REST funcional, testada e implantada de forma automatizada que 
 | 09 | [Testes](09-testes.md) | Estratégia, níveis, cenários BDD, como executar |
 | 10 | [Plano de execução](10-plano-execucao.md) | Backlog, DoR, DoD, cronograma e riscos |
 | 11 | [Roteiro do vídeo](11-roteiro-video.md) | Roteiro da demonstração em vídeo, checklist de preparação e comandos |
-| 12 | [Observabilidade](12-observabilidade.md) | Logs, métricas Prometheus, golden signals, SLIs/SLOs, alertas e plano de APM |
+| 12 | [Observabilidade](12-observabilidade.md) | Logs, métricas, Prometheus e Grafana no cluster, golden signals, SLIs/SLOs, alertas ativos e plano de APM |
 | 13 | [Design Approval Sheet](13-das.md) | Folha de aprovação do desenho: escopo, decisões, atributos de qualidade, riscos, custos e aprovação |
 | — | [ADRs](adrs/README.md) | Registros de decisões de arquitetura |

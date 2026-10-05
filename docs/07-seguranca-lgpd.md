@@ -12,19 +12,22 @@ Este documento reúne o modelo de ameaças da solução, os controles de seguran
 | Credenciais de usuários (hash de senha) | Banco `keycloak` | Alto |
 | Chave privada de assinatura dos tokens | Keycloak (banco `keycloak`) | Crítico: permitiria forjar qualquer token |
 | Estado das vendas e do estoque | Banco `revenda` | Alto: venda dupla, venda sem pagamento |
-| Segredo do webhook | Secret `revenda-webhook-secret` | Alto: efetivação de vendas sem pagamento |
+| Segredo do webhook | Secrets `revenda-webhook-secret` (API) e `kong-config` (credencial do consumer `gateway-pagamento` no Kong, mesmo valor) | Alto: efetivação de vendas sem pagamento |
+| Configuração do API Gateway | Secret `gateway/kong-config`, gerado pelo Terraform a partir de `infra/kong/kong.yml.tftpl` | Alto: abrir rotas internas (`/metrics`) ou remover limites e a credencial do webhook |
+| Métricas e painel | Prometheus e Grafana (namespace `observabilidade`); admin do Grafana no Secret `grafana-admin` | Baixo/médio: contadores de negócio (volume de vendas), sem dados pessoais |
 | Segredos do banco da API e do webhook | Secrets do namespace `revenda` e state `revenda-api.tfstate` (este repositório) | Crítico |
 | Segredos do banco e do admin do Keycloak | Secrets do namespace `identidade` e state `identidade.tfstate` (repositório de identidade; fora do alcance do pipeline da API, exceto os Secrets de contrato `keycloak-gestor` e `keycloak-e2e`, lidos pelo e2e) | Crítico |
 | Pipeline de CD e runner self-hosted | PC do autor | Crítico: execução de código arbitrário com acesso ao cluster |
 
-Fronteiras de confiança: (1) internet/navegador → API e Keycloak; (2) gateway externo → webhook; (3) namespace `revenda` ↔ namespace `identidade`; (4) GitHub → runners self-hosted; (5) repositório da API ↔ repositório de identidade, que só se comunicam pelo contrato publicado (OIDC/JWT e Secrets de contrato do ambiente local).
+Fronteiras de confiança: (1) internet/navegador → API Gateway (Kong) → API, e navegador → Keycloak; (2) gateway de pagamento externo → Kong → webhook; (3) namespace `revenda` ↔ namespace `identidade`; (4) GitHub → runners self-hosted; (5) repositório da API ↔ repositório de identidade, que só se comunicam pelo contrato publicado (OIDC/JWT e Secrets de contrato do ambiente local).
 
 ## 2. Modelo de ameaças (STRIDE por componente)
 
 | Componente | S — Falsificação | T — Adulteração | R — Repúdio | I — Divulgação | D — Negação de serviço | E — Elevação de privilégio |
 |---|---|---|---|---|---|---|
-| **revenda-api (endpoints com JWT)** | Token forjado ou de outro emissor → assinatura RS256 via JWKS, `iss`, `aud`, `azp`, `exp` validados; `alg` fixo | Alteração de claims → assinatura; alteração de preço pelo cliente → preço vem do banco, não do corpo | Ações sem trilha → log estruturado com `sub`, `request_id`, eventos de domínio | Acesso a venda alheia (BOLA) → filtro por `comprador_id`; 404 para não dono; erros sem stack trace | Abuso das listagens → paginação com `limite` ≤ 100 e `deslocamento` ≤ 1.000.000; HPA; *rate limiting* na borda como evolução ([ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md)) | Cliente chamando rota de gestor → RBAC por `realm_access.roles` em cada rota |
-| **Webhook de pagamento** | Chamador se passando pelo gateway → `X-Webhook-Secret` comparado em tempo constante | Replay de notificação → idempotência por estado da venda; HMAC do corpo com timestamp como evolução | Gateway nega ter enviado → log do payload (sem segredo) e do `request_id` | Segredo exposto em log → header nunca é registrado | Inundação de chamadas → custo baixo por chamada; rate limiting como evolução | Efetivar venda sem pagamento → só com segredo válido |
+| **API Gateway (Kong)** | Parceiro de pagamento falso → key-auth + ACL no webhook (só o consumer `gateway-pagamento`) | Alteração de rotas ou limites → configuração declarativa versionada, revisada por PR, validada no CI (`kong config parse`); Admin API só em `127.0.0.1` e somente leitura (DB-less) | Requisição sem rastro → `X-Request-ID` gerado no Kong e repetido no log da API; log de acesso do Kong | Rotas internas expostas → só as rotas declaradas são encaminhadas; `/metrics` sem rota (404) | Inundação → *rate limiting* por IP (600/min em `/api/v1`, 60/min na compra), payload ≤ 1 MB; uma réplica é ponto único de falha (alerta `KongFora`) | Contornar o gateway → API ClusterIP + NetworkPolicy `revenda-api-somente-gateway` |
+| **revenda-api (endpoints com JWT)** | Token forjado ou de outro emissor → assinatura RS256 via JWKS, `iss`, `aud`, `azp`, `exp` validados; `alg` fixo | Alteração de claims → assinatura; alteração de preço pelo cliente → preço vem do banco, não do corpo | Ações sem trilha → log estruturado com `sub`, `request_id`, eventos de domínio | Acesso a venda alheia (BOLA) → filtro por `comprador_id`; 404 para não dono; erros sem stack trace | Abuso das listagens → paginação com `limite` ≤ 100 e `deslocamento` ≤ 1.000.000; HPA; *rate limiting* no Kong ([ADR-015](adrs/ADR-015-api-gateway-kong.md)) | Cliente chamando rota de gestor → RBAC por `realm_access.roles` em cada rota |
+| **Webhook de pagamento** | Chamador se passando pelo gateway → credencial key-auth no Kong e, de novo, `X-Webhook-Secret` comparado em tempo constante na API | Replay de notificação → idempotência por estado da venda; HMAC do corpo com timestamp como evolução | Gateway nega ter enviado → log do payload (sem segredo) e do `request_id` | Segredo exposto em log → header nunca é registrado | Inundação de chamadas → chamadas sem credencial barradas no Kong, sem chegar à API; *rate limiting* da rota `/api/v1`; alertas `RevendaWebhookRecusado` e `KongRejeicoesNaBorda` | Efetivar venda sem pagamento → só com segredo válido (no Kong e na API) |
 | **Keycloak** | Senha fraca / força bruta → política de senha do realm e *brute force detection* habilitados | Alteração de papéis → console admin com senha gerada pelo Terraform do repositório de identidade, que nunca chega a este repositório nem ao seu pipeline | Logins não rastreados → eventos de login e de admin habilitados no realm | Vazamento de dados pessoais pelo token → access token só com `sub`, papéis e audiência (`profile` e `email` apenas opcionais nos clients) | Sobrecarga do login → fora do escopo local | Autocadastro obtendo `gestor` → papel padrão é apenas `cliente`; `gestor` só por admin |
 | **PostgreSQL revenda** | Conexão de pod não autorizado → NetworkPolicy + credencial por Secret | SQL injection → SQLAlchemy com parâmetros vinculados, sem SQL concatenado | — | Leitura do banco → não contém dados pessoais (só pseudônimo); logs do SQLAlchemy sem valores de parâmetros (`hide_parameters`) | Esgotamento de conexões → pool limitado por réplica | Usuário da aplicação com DDL → evolução: separar papel de migração e de aplicação |
 | **PostgreSQL keycloak** | Idem → NetworkPolicy só a partir do Keycloak | — | — | Exposição de dados pessoais → banco não exposto ao host; instância separada | — | API sem credencial para este banco |
@@ -58,8 +61,9 @@ Fronteiras de confiança: (1) internet/navegador → API e Keycloak; (2) gateway
 |---|---|
 | Tokens | Só as claims necessárias (`sub`, papéis, `aud`, `azp`); sem dados pessoais. Nos clients `revenda-swagger` e `revenda-e2e`, os escopos `profile` e `email` são apenas opcionais |
 | Pods | `runAsNonRoot: true`, `runAsUser: 10001`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `readOnlyRootFilesystem: true` (com `emptyDir` em `/tmp`), `seccompProfile: RuntimeDefault`, `automountServiceAccountToken: false` |
-| Rede | NetworkPolicy: banco da API só aceita pods `app=revenda-api` e `app=revenda-migracao`; banco do Keycloak só aceita `app=keycloak` e nunca é exposto (política declarada no repositório de identidade). O banco da API é publicado em `127.0.0.1:15432` (NodePort 30432) apenas para a demonstração do vídeo, com `expor_banco_revenda = true` (padrão); `false` o torna ClusterIP |
+| Rede | API Gateway como única entrada: o Service `revenda-api` é ClusterIP e a NetworkPolicy `revenda-api-somente-gateway` só aceita, na porta 8000, o Kong (ns `gateway`), o Prometheus (ns `observabilidade`) e o tráfego do nó (probes); o namespace `identidade` não alcança a API. NetworkPolicy: banco da API só aceita pods `app=revenda-api` e `app=revenda-migracao`; banco do Keycloak só aceita `app=keycloak` e nunca é exposto (política declarada no repositório de identidade). O banco da API é publicado em `127.0.0.1:15432` (NodePort 30432) apenas para a demonstração do vídeo, com `expor_banco_revenda = true` (padrão); `false` o torna ClusterIP |
 | Credenciais | API sem credencial do banco do Keycloak e vice-versa; Secrets montados apenas nos pods que os usam; o state e o pipeline da API não contêm segredos da identidade; o e2e usa o client técnico `revenda-e2e-admin` em vez do admin do realm `master` |
+| Monitoramento | Prometheus só com **Roles** de leitura de pods nos namespaces `revenda` e `gateway` (sem ClusterRole, não enxerga `identidade`); Grafana com leitura anônima apenas como Viewer, painel não editável pela interface e admin com senha gerada; Kong, Prometheus e Grafana não root, com raiz somente leitura e `capabilities.drop: [ALL]` |
 | Pipelines | `permissions: contents: read` nos workflows; o runner self-hosted roda como usuário sem privilégio de administrador; cada repositório tem o próprio runner, que só aplica o próprio namespace com o próprio state |
 | Banco | Evolução: papel `revenda_migracao` (DDL) separado de `revenda_app` (somente DML nos schemas `catalogo` e `vendas`) |
 
@@ -70,16 +74,16 @@ Fronteiras de confiança: (1) internet/navegador → API e Keycloak; (2) gateway
 | Repositório e revisão | `fiap-soat-revenda-veiculos` | [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade) |
 | Pipeline de CI/CD e runner | CI `qualidade`/`testes`/`imagem`/`infra`; CD no `revenda-runner` | CI `qualidade`/`realm`/`infra`; CD no `revenda-runner-identidade` |
 | State do Terraform (com segredos) | `revenda-api.tfstate` | `identidade.tfstate` |
-| Namespace Kubernetes | `revenda` | `identidade` |
+| Namespace Kubernetes | `revenda` (e `gateway`, `observabilidade`) | `identidade` |
 | Banco PostgreSQL | `revenda-db` (sem dados pessoais) | `keycloak-db` (nome, e-mail, CPF, telefone, credenciais) |
-| Credenciais | `revenda-db-credentials`, `revenda-webhook-secret` | `keycloak-db-credentials`, `keycloak-admin`, `keycloak-gestor`, `keycloak-e2e` |
+| Credenciais | `revenda-db-credentials`, `revenda-webhook-secret`, `kong-config`, `grafana-admin` | `keycloak-db-credentials`, `keycloak-admin`, `keycloak-gestor`, `keycloak-e2e` |
 | Ligação entre os dois | Só o contrato público: JWT validado pelo JWKS, `sub` como pseudônimo; no ambiente local, o e2e lê os Secrets de contrato `keycloak-gestor` e `keycloak-e2e` | |
 
 Sobre o suporte a NetworkPolicy: o CNI padrão do kind (kindnet) passou a implementar NetworkPolicy a partir da versão 0.24. O projeto exige essa versão ou superior e valida o bloqueio no teste de fumaça; se o CNI não aplicar as políticas, elas permanecem como declaração de intenção versionada.
 
 ### 3.4 Gestão de segredos
 
-- Todos os segredos são **gerados pelo Terraform** com `random_password` e gravados como `kubernetes_secret` ([ADR-011](adrs/ADR-011-segredos-terraform.md)), cada um pelo repositório dono dele: senha do banco da API e segredo do webhook por este repositório; senha do banco do Keycloak, do admin, do `gestor.loja` e do client `revenda-e2e-admin` pelo repositório de identidade ([ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md)). Nenhum valor sensível é digitado, versionado ou colocado em ConfigMap.
+- Todos os segredos são **gerados pelo Terraform** com `random_password` e gravados como `kubernetes_secret` ([ADR-011](adrs/ADR-011-segredos-terraform.md)), cada um pelo repositório dono dele: senha do banco da API, segredo do webhook (entregue à API e, como credencial do consumer `gateway-pagamento`, ao Kong) e senha do admin do Grafana por este repositório; senha do banco do Keycloak, do admin, do `gestor.loja` e do client `revenda-e2e-admin` pelo repositório de identidade ([ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md)). Nenhum valor sensível é digitado, versionado ou colocado em ConfigMap.
 - `*.tfstate*`, `.terraform/`, kubeconfig e `.env` estão no `.gitignore`; o repositório tem apenas `.env.example` com valores fictícios.
 - O state do Terraform contém os segredos em texto claro; por isso ele fica fora do repositório (`%USERPROFILE%\.revenda\revenda-api.tfstate`; o da identidade é outro arquivo, `identidade.tfstate`), em diretório do usuário do runner com permissão restrita (ver [08-ci-cd-infra.md](08-ci-cd-infra.md)).
 - **Lição aprendida**: na fase 2, `secret.yaml`, kubeconfig e `tfstate` foram versionados por engano. Nesta fase, além do `.gitignore`, o CI executa uma varredura de segredos (Trivy com o *scanner* `secret` no repositório) e o template de PR contém o item de verificação "nenhum segredo adicionado".
@@ -89,12 +93,28 @@ Sobre o suporte a NetworkPolicy: o CNI padrão do kind (kindnet) passou a implem
 
 - Autenticado pelo header `X-Webhook-Secret`, comparado com o valor esperado em **tempo constante** (ex.: `hmac.compare_digest`), o que impede descobrir o segredo pela medição do tempo de resposta.
 - O header nunca é registrado em log; respostas 401 não diferenciam "ausente" de "incorreto".
+- **Na borda**: o Kong exige a mesma credencial pelo plugin key-auth (header `X-Webhook-Secret`) e o plugin ACL só deixa passar o consumer `gateway-pagamento`. Sem credencial válida, o Kong responde 401 e a API nem é chamada. `hide_credentials: false`: o header continua chegando à API, que valida de novo (defesa em profundidade); a regra de autenticação do webhook não depende só do gateway ([ADR-015](adrs/ADR-015-api-gateway-kong.md)).
 - Idempotência por estado: reenvios do gateway não causam efeito duplicado.
 - Evoluções para produção: assinatura HMAC-SHA256 do corpo com timestamp (proteção contra replay e adulteração), lista de IPs de origem do gateway, mTLS e rotação do segredo com período de convivência de dois valores.
 
-### 3.6 Proteção contra abuso (rate limiting) — evolução
+### 3.6 Proteção de borda (API Gateway e rate limiting)
 
-Não implementado nesta entrega: não há API Gateway na frente da API ([ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md)). Recomendações: limite por IP nas rotas públicas e por `sub` em `POST /api/v1/vendas` (por exemplo, no gateway de API ou com um middleware de *token bucket*), além de um **limite de reservas ativas por comprador**, que impediria um único cliente de reservar todo o estoque (risco de "fluxo de negócio sensível" do OWASP API Security Top 10). Mitigações já existentes: paginação com limites máximos (`limite` ≤ 100 e `deslocamento` ≤ 1.000.000), validações estritas de entrada, expiração das reservas em 30 minutos e HPA.
+Implementado com o **Kong DB-less** ([ADR-015](adrs/ADR-015-api-gateway-kong.md)), única entrada HTTP da API no ambiente kind:
+
+| Controle | Configuração |
+|---|---|
+| Única entrada | `localhost:8080` → NodePort 30080 → Kong; Service `revenda-api` ClusterIP; NetworkPolicy `revenda-api-somente-gateway` (só Kong, Prometheus e nó) |
+| Superfície exposta | Só as rotas declaradas: `/api/v1`, `/docs`, `/openapi.json`, `/health/*`. `/metrics` e qualquer outro caminho → 404 do Kong |
+| *Rate limiting* | 600 req/min por IP em `/api/v1`; 60 req/min por IP em `POST /api/v1/vendas`; excedente → 429 com `Retry-After`; cabeçalhos `RateLimit-*` em toda resposta dessas rotas. Limites nas variáveis `kong_limite_geral_minuto` e `kong_limite_compra_minuto` do Terraform |
+| Webhook | key-auth + ACL (consumer `gateway-pagamento`), além da validação na API (seção 3.5) |
+| Tamanho de payload | Até 1 MB (`request-size-limiting`); acima → 413 |
+| Correlação | `X-Request-ID` gerado no Kong quando ausente, repetido na resposta e no log da API |
+| Admin API | Só em `127.0.0.1:8001` dentro do pod, somente leitura (DB-less); sem Service |
+| Monitoramento | Alerta `KongRejeicoesNaBorda` (401/403/429 acima de 0,5/s por 5 min) e painel "Barradas na borda" ([12-observabilidade.md](12-observabilidade.md)) |
+
+O **JWT não é validado no Kong**: a validação fica num ponto só, na API, que já tem testes de unidade, integração e e2e; o gateway não substitui nenhum controle da API.
+
+Limitações e evoluções: os contadores são locais ao pod (`policy: local`); com mais de uma réplica do Kong, usar `policy: redis`. O limite da compra é por IP, não por `sub` (exigiria que o Kong lesse o token). Continua como evolução um **limite de reservas ativas por comprador**, que impediria um único cliente de reservar todo o estoque (risco de "fluxo de negócio sensível" do OWASP API Security Top 10); hoje o risco é contido pelo limite de 60 compras por minuto por IP e pela expiração das reservas em 30 minutos. Mitigações na própria API continuam: paginação com limites máximos (`limite` ≤ 100 e `deslocamento` ≤ 1.000.000), validações estritas de entrada e HPA.
 
 ### 3.7 Containers, imagem e cadeia de suprimentos
 
@@ -105,12 +125,13 @@ Não implementado nesta entrega: não há API Gateway na frente da API ([ADR-013
 
 ### 3.8 Transporte
 
-No ambiente local, a comunicação é HTTP em `localhost` e o Keycloak roda em `start-dev`. Em produção: TLS em todas as conexões externas (terminação em Ingress ou Gateway API), Keycloak em modo `start` com `KC_HOSTNAME` HTTPS e cookies seguros, e TLS também entre aplicação e banco.
+No ambiente local, a comunicação é HTTP em `localhost` e o Keycloak roda em `start-dev`. Em produção: TLS em todas as conexões externas (terminação no Kong, num Ingress ou na Gateway API), Keycloak em modo `start` com `KC_HOSTNAME` HTTPS e cookies seguros, e TLS também entre aplicação e banco.
 
 ### 3.9 Logs e auditoria
 
 - Log estruturado em JSON com `request_id`, rota, status, latência e `sub` (pseudônimo). Nunca são registrados: tokens, header `Authorization`, `X-Webhook-Secret`, senhas. O engine do SQLAlchemy usa `hide_parameters=True`, para que erros de banco não levem valores de parâmetros ao log. Respostas 5xx são registradas em nível `ERROR`.
-- `GET /metrics` (Prometheus) expõe só contagens e latências por rota template, status e motivo de cancelamento, sem identificadores nem dados pessoais. No ambiente local ele é público como as listagens; em produção deve ficar restrito à rede interna do cluster (Service ClusterIP ou NetworkPolicy para o Prometheus), porque os contadores de vendas são informação de negócio ([12-observabilidade.md](12-observabilidade.md)).
+- `GET /metrics` (Prometheus) expõe só contagens e latências por rota template, status e motivo de cancelamento, sem identificadores nem dados pessoais. Como os contadores de vendas são informação de negócio, o endpoint é **interno**: o Kong não tem rota para ele (404 pelo host), o Service da API é ClusterIP e a NetworkPolicy só deixa o Prometheus (e o Kong) chegarem à porta 8000. O painel do Grafana, que mostra esses contadores, fica só em `127.0.0.1:3000` ([12-observabilidade.md](12-observabilidade.md)).
+- O Kong registra cada requisição no log de acesso (stdout) com o mesmo `X-Request-ID` da API; credenciais não são registradas.
 - Eventos de domínio (`CompraIniciada`, `VendaEfetivada`, `VendaCancelada`, `ReservaExpirada` etc.) são registrados como trilha de auditoria de negócio.
 - No Keycloak, eventos de login e de administração ficam habilitados no realm.
 
@@ -124,11 +145,11 @@ No ambiente local, a comunicação é HTTP em `localhost` e o Keycloak roda em `
 | A02 Cryptographic Failures | JWT RS256; senhas com hash no Keycloak; segredos aleatórios gerados; TLS como requisito de produção |
 | A03 Injection | ORM com parâmetros vinculados; validação de entrada com Pydantic (tipos estritos, tamanhos, enums, regex do código de pagamento); caracteres de controle rejeitados em marca, modelo e cor (422), o que também evita injeção em logs |
 | A04 Insecure Design | Modelagem de ameaças (este documento); invariantes no domínio e no banco; UPDATE condicional e índice único parcial contra venda dupla |
-| A05 Security Misconfiguration | Containers non-root e read-only; banco do Keycloak sem exposição e banco da API exposto só em `127.0.0.1` para demonstração; `start-dev` restrito ao ambiente local; erros sem stack trace |
+| A05 Security Misconfiguration | API alcançável só pelo gateway, com rotas declaradas (sem `/metrics` nem Admin API expostos); containers non-root e read-only; banco do Keycloak sem exposição e banco da API exposto só em `127.0.0.1` para demonstração; `start-dev` restrito ao ambiente local; erros sem stack trace |
 | A06 Vulnerable and Outdated Components | Trivy no CI; Dependabot; versões fixadas de imagens e providers |
 | A07 Identification and Authentication Failures | Autenticação delegada ao Keycloak (política de senha, *brute force detection*); validação completa do token; tokens de vida curta |
 | A08 Software and Data Integrity Failures | `main` protegida, PR e CI obrigatórios; CD só a partir da `main`; imagem identificada pelo SHA |
-| A09 Security Logging and Monitoring Failures | Log estruturado com `request_id`; respostas 5xx em nível `ERROR`; eventos de domínio; eventos do Keycloak; métricas Prometheus em `/metrics` com alertas propostos ([12-observabilidade.md](12-observabilidade.md)) |
+| A09 Security Logging and Monitoring Failures | Log estruturado com `request_id`; respostas 5xx em nível `ERROR`; eventos de domínio; eventos do Keycloak; Prometheus coletando API e Kong, painel no Grafana e regras de alerta ativas e testadas no CI, inclusive para webhook recusado e rejeições na borda ([12-observabilidade.md](12-observabilidade.md)) |
 | A10 Server-Side Request Forgery | A API não faz requisições a URLs fornecidas pelo usuário; a única chamada de saída é ao JWKS, com URL fixa por configuração |
 
 ### 4.2 OWASP API Security Top 10:2023 (riscos específicos de API)
@@ -136,13 +157,13 @@ No ambiente local, a comunicação é HTTP em `localhost` e o Keycloak roda em `
 | Risco | Controles |
 |---|---|
 | API1 Broken Object Level Authorization | Filtro por dono em `GET /api/v1/vendas/{id}` e `POST /api/v1/vendas/{id}/cancelar` |
-| API2 Broken Authentication | Seção 3.1 |
+| API2 Broken Authentication | Seção 3.1; webhook com credencial conferida no Kong e na API (seção 3.5) |
 | API3 Broken Object Property Level Authorization | Schemas de entrada fechados (campos desconhecidos → 422; `status` e `versao` não editáveis); `comprador_id` só para gestor |
-| API4 Unrestricted Resource Consumption | Paginação limitada (`limite` ≤ 100, `deslocamento` ≤ 1.000.000, acima disso 422); HPA; rate limiting na borda como evolução ([ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md)) |
+| API4 Unrestricted Resource Consumption | Paginação limitada (`limite` ≤ 100, `deslocamento` ≤ 1.000.000, acima disso 422); HPA; *rate limiting* por IP no Kong e payload ≤ 1 MB ([ADR-015](adrs/ADR-015-api-gateway-kong.md), seção 3.6) |
 | API5 Broken Function Level Authorization | Papel exigido declarado em cada rota; testes de 401/403 por rota |
-| API6 Unrestricted Access to Sensitive Business Flows | Reserva expira em 30 min; limite de reservas por comprador como evolução |
+| API6 Unrestricted Access to Sensitive Business Flows | Reserva expira em 30 min; compra limitada a 60 req/min por IP no Kong; limite de reservas por comprador como evolução |
 | API8 Security Misconfiguration | Ver A05 |
-| API9 Improper Inventory Management | Versão no prefixo `/api/v1`; OpenAPI gerado do código e publicado em `/docs` |
+| API9 Improper Inventory Management | Versão no prefixo `/api/v1`; OpenAPI gerado do código e publicado em `/docs`; inventário de rotas expostas explícito na configuração declarativa do Kong |
 
 ## 5. LGPD
 

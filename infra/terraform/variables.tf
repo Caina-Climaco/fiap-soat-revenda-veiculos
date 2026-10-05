@@ -37,3 +37,33 @@ variable "metrics_server_chart_versao" {
   type        = string
   default     = "3.14.0"
 }
+
+variable "kong_imagem" {
+  description = "Imagem oficial do Kong Gateway (OSS), modo DB-less (ADR-015)."
+  type        = string
+  default     = "kong:3.9.3"
+}
+
+variable "kong_limite_geral_minuto" {
+  description = "Rate limiting do Kong na rota /api/v1: requisicoes por minuto por IP."
+  type        = number
+  default     = 600
+}
+
+variable "kong_limite_compra_minuto" {
+  description = "Rate limiting do Kong em POST /api/v1/vendas: requisicoes por minuto por IP."
+  type        = number
+  default     = 60
+}
+
+variable "prometheus_imagem" {
+  description = "Imagem oficial do Prometheus (ADR-016)."
+  type        = string
+  default     = "prom/prometheus:v3.14.0"
+}
+
+variable "grafana_imagem" {
+  description = "Imagem oficial do Grafana OSS (ADR-016)."
+  type        = string
+  default     = "grafana/grafana:13.2.3"
+}

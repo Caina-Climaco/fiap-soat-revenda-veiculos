@@ -420,6 +420,14 @@ class Api:
                 f"listagem fora de ordem na posicao {i}: {precos[i - 1]} > {precos[i]}"
             )
 
+    @staticmethod
+    def barrado_no_gateway(resposta: httpx.Response, status: int) -> None:
+        """A resposta foi produzida pelo proprio Kong (nao chegou a API)."""
+        assert resposta.status_code == status, (resposta.status_code, resposta.text[:300])
+        servidor = resposta.headers.get("server", "").lower()
+        assert servidor.startswith("kong"), f"esperada resposta do Kong, Server={servidor!r}"
+        assert "x-kong-upstream-latency" not in resposta.headers, "a requisicao chegou a API"
+
 
 # --------------------------------------------------------------------------- #
 # Fixtures
@@ -458,6 +466,19 @@ def api(e2e_config: Config, http: httpx.Client, keycloak: Keycloak) -> Api:
         f"{pronto.status_code} {pronto.text[:200]}"
     )
     return Api(e2e_config, http, keycloak)
+
+
+@pytest.fixture(scope="session")
+def via_gateway(e2e_config: Config, http: httpx.Client) -> bool:
+    """A API esta atras do API Gateway (Kong, ADR-015)?
+
+    ``E2E_GATEWAY=1`` (CD) torna o gateway obrigatorio; sem a variavel, detecta pelo
+    cabecalho ``Via`` que o Kong acrescenta nas respostas que ele encaminha.
+    """
+    if os.environ.get("E2E_GATEWAY") == "1":
+        return True
+    resposta = http.get(f"{e2e_config.api_url}/health/live")
+    return "kong" in resposta.headers.get("via", "").lower()
 
 
 @pytest.fixture(scope="session")

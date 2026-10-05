@@ -64,3 +64,75 @@ resource "kubernetes_network_policy_v1" "revenda_db" {
     }
   }
 }
+
+# revenda-api: dentro do cluster, so o Kong (namespace gateway) chega a API, e o Prometheus
+# (namespace observabilidade) le /metrics. Nenhum outro namespace (por exemplo, identidade)
+# alcanca a API diretamente: o caminho de entrada e sempre o API Gateway (ADR-015).
+# O trafego do proprio no (probes do kubelet) entra pelo IP do no / gateway da faixa de
+# pods, liberado pelas duas ultimas regras, como no revenda-db.
+resource "kubernetes_network_policy_v1" "revenda_api" {
+  metadata {
+    name      = "revenda-api-somente-gateway"
+    namespace = kubernetes_namespace_v1.revenda.metadata[0].name
+    labels    = local.rotulos_comuns
+  }
+
+  spec {
+    pod_selector {
+      match_labels = {
+        app = "revenda-api"
+      }
+    }
+
+    policy_types = ["Ingress"]
+
+    ingress {
+      from {
+        namespace_selector {
+          match_labels = {
+            "kubernetes.io/metadata.name" = kubernetes_namespace_v1.gateway.metadata[0].name
+          }
+        }
+        pod_selector {
+          match_labels = {
+            app = "kong"
+          }
+        }
+      }
+      from {
+        namespace_selector {
+          match_labels = {
+            "kubernetes.io/metadata.name" = kubernetes_namespace_v1.observabilidade.metadata[0].name
+          }
+        }
+        pod_selector {
+          match_labels = {
+            app = "prometheus"
+          }
+        }
+      }
+      ports {
+        port     = "8000"
+        protocol = "TCP"
+      }
+    }
+
+    ingress {
+      from {
+        ip_block {
+          cidr   = "0.0.0.0/0"
+          except = [var.pod_subnet]
+        }
+      }
+      from {
+        ip_block {
+          cidr = "${cidrhost(var.pod_subnet, 1)}/32"
+        }
+      }
+      ports {
+        port     = "8000"
+        protocol = "TCP"
+      }
+    }
+  }
+}

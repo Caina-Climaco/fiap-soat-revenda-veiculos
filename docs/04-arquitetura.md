@@ -17,16 +17,18 @@ A fronteira física relevante para o enunciado é **identidade × transacional**
 
 O Gateway de Pagamento é um sistema externo **simulado**; ele notifica o resultado do pagamento por webhook, tratado por uma camada anticorrupção (ACL) no módulo Vendas ([ADR-007](adrs/ADR-007-pagamento-webhook.md)).
 
+Na frente da API há um **API Gateway** (Kong DB-less, namespace `gateway`), única entrada HTTP: *rate limiting*, credencial do parceiro de pagamento, `X-Request-ID`, limite de payload e métricas na borda; a API continua validando JWT, papéis e o segredo do webhook ([ADR-015](adrs/ADR-015-api-gateway-kong.md)). Prometheus e Grafana (namespace `observabilidade`) coletam a API e o gateway, com painel e alertas versionados ([ADR-016](adrs/ADR-016-prometheus-grafana.md)). Não são sistemas de negócio, por isso aparecem a partir da visão de containers.
+
 ### 1.2 Atributos de qualidade priorizados
 
 | Prioridade | Atributo | Cenário de qualidade | Táticas adotadas |
 |---|---|---|---|
-| 1 | **Segurança e privacidade** | Um invasor com acesso somente leitura ao banco da API não obtém nome, e-mail, CPF ou telefone de nenhum cliente | Identidade apartada (repositório, pipeline, namespace e instância de banco distintos); `comprador_id` = `sub` (pseudônimo); JWT RS256 validado; RBAC; segredos fora do Git |
+| 1 | **Segurança e privacidade** | Um invasor com acesso somente leitura ao banco da API não obtém nome, e-mail, CPF ou telefone de nenhum cliente | Identidade apartada (repositório, pipeline, namespace e instância de banco distintos); `comprador_id` = `sub` (pseudônimo); JWT RS256 validado; RBAC; segredos fora do Git; API Gateway como única entrada, com *rate limiting* e key-auth no webhook |
 | 2 | **Consistência / integridade** | Dois clientes que compram o mesmo veículo no mesmo instante: exatamente um recebe 201, o outro 409 | UPDATE condicional, índice único parcial, transação única (Unit of Work) ([ADR-008](adrs/ADR-008-concorrencia-update-condicional.md)) |
 | 3 | **Implantabilidade** | Um PR mergeado na `main` chega ao cluster sem passo manual, com migração aplicada e teste e2e verde | CLI kind + Terraform + kustomize + CD self-hosted + Job de migração ([08-ci-cd-infra.md](08-ci-cd-infra.md)) |
 | 4 | **Testabilidade** | Regras de domínio testáveis sem banco, sem rede e com relógio controlado | Clean Architecture, portas e adaptadores, `Clock` injetável ([09-testes.md](09-testes.md)) |
 | 5 | **Manutenibilidade / evolutividade** | Extrair Vendas para um serviço próprio sem reescrever o domínio | Dependência de Vendas em Catálogo apenas pela porta `CatalogoPort`; schemas separados |
-| 6 | **Disponibilidade (local)** | A queda de uma réplica da API não interrompe as requisições | 2 réplicas, readiness probe, HPA 2..5 |
+| 6 | **Disponibilidade (local)** | A queda de uma réplica da API não interrompe as requisições | 2 réplicas, readiness probe, HPA 2..5; alertas `RevendaApiFora` e `KongFora` no Prometheus |
 | 7 | **Desempenho** | Listagens públicas respondem em p95 < 300 ms com 1.000 veículos | Índice `(status, preco)`, paginação obrigatória com limite máximo 100 |
 
 ## 2. C4 nível 1 — Contexto
@@ -65,8 +67,17 @@ C4Container
   Person(usuario, "Gestor / Cliente / Visitante", "Navegador")
   System_Ext(gateway, "Gateway de Pagamento", "Simulado via Swagger ou curl")
 
+  Boundary(ns_gateway, "Namespace gateway", "Kubernetes") {
+    Container(kong, "API Gateway", "Kong 3.9.3, DB-less", "Única entrada HTTP; rate limiting, key-auth + ACL no webhook, X-Request-ID, métricas")
+  }
+
+  Boundary(ns_obs, "Namespace observabilidade", "Kubernetes") {
+    Container(prom, "Prometheus", "Prometheus 3.14.0", "Coleta API e Kong; avalia regras de alerta")
+    Container(graf, "Grafana", "Grafana 13.2.3", "Painel provisionado; leitura anônima")
+  }
+
   Boundary(ns_revenda, "Namespace revenda", "Kubernetes") {
-    Container(api, "revenda-api", "Python 3.12, FastAPI, SQLAlchemy 2", "Módulos Catálogo e Vendas; Swagger UI em /docs; métricas em /metrics")
+    Container(api, "revenda-api", "Python 3.12, FastAPI, SQLAlchemy 2", "Módulos Catálogo e Vendas; Swagger UI em /docs; métricas em /metrics (só interno)")
     ContainerDb(dbapi, "PostgreSQL revenda", "PostgreSQL 16, StatefulSet", "Schemas catalogo e vendas; sem dados pessoais")
     Container(mig, "Job de migração", "Alembic", "Aplica migrações antes de cada rollout")
   }
@@ -76,9 +87,14 @@ C4Container
     ContainerDb(dbkc, "PostgreSQL keycloak", "PostgreSQL 16, StatefulSet", "Usuários, credenciais, atributos pessoais")
   }
 
-  Rel(usuario, api, "Usa a API e o Swagger UI", "HTTP :8080")
+  Rel(usuario, kong, "Usa a API e o Swagger UI", "HTTP :8080")
   Rel(usuario, kc, "Login, cadastro, conta", "HTTP :8180")
-  Rel(gateway, api, "POST /api/v1/pagamentos/webhook", "HTTP :8080")
+  Rel(usuario, graf, "Painel", "HTTP :3000")
+  Rel(gateway, kong, "POST /api/v1/pagamentos/webhook", "HTTP :8080 + X-Webhook-Secret")
+  Rel(kong, api, "Encaminha as rotas publicadas", "HTTP interno :80")
+  Rel(prom, api, "Coleta /metrics", "HTTP :8000")
+  Rel(prom, kong, "Coleta métricas", "HTTP :8100")
+  Rel(graf, prom, "Consultas PromQL", "HTTP :9090")
   Rel(api, dbapi, "Lê e grava", "SQL :5432")
   Rel(mig, dbapi, "DDL", "SQL :5432")
   Rel(api, kc, "Busca JWKS", "HTTP interno :8080")
@@ -88,7 +104,10 @@ C4Container
 
 | Container | Tecnologia | Exposição |
 |---|---|---|
-| `revenda-api` | Imagem `revenda-api:<sha>`, Uvicorn na porta 8000 | Service NodePort 30080 → host 8080; `/metrics` na mesma porta, com anotações `prometheus.io/*` no pod |
+| API Gateway `kong` | `kong:3.9.3`, DB-less, configuração declarativa no Secret `kong-config` | Service NodePort 30080 → host 8080 (proxy); `kong-status` ClusterIP 8100 (métricas e probes); Admin API só em `127.0.0.1` dentro do pod |
+| `revenda-api` | Imagem `revenda-api:<sha>`, Uvicorn na porta 8000 | Service **ClusterIP** `revenda-api:80`, alcançado só pelo Kong (NetworkPolicy `revenda-api-somente-gateway`); `/metrics` na mesma porta, sem rota no Kong, coletado pelo Prometheus pelas anotações `prometheus.io/*` do pod |
+| Prometheus | `prom/prometheus:v3.14.0`, retenção 2 dias em `emptyDir` | Service NodePort 30900 → host 9090 |
+| Grafana | `grafana/grafana:13.2.3`, fonte de dados e painel provisionados | Service NodePort 30300 → host 3000 |
 | Job de migração | Mesma imagem, comando `python -m revenda.migracao` (`alembic upgrade head`, mas sem efeito quando o banco está numa revisão mais nova que a imagem, caso de rollback) | Não exposto |
 | PostgreSQL `revenda` | `postgres:16.15-alpine`, PVC | Service `revenda-db:5432`, NodePort 30432 → host `127.0.0.1:15432` por padrão, para a demonstração (`expor_banco_revenda = false` o torna ClusterIP) |
 | Keycloak (repositório de identidade) | `quay.io/keycloak/keycloak:26.7.1`, *limit* de memória 1536Mi | Service NodePort 30180 → host 8180 |
@@ -102,8 +121,8 @@ O diagrama a seguir usa `flowchart` com subgraphs no estilo C4, porque o `C4Comp
 
 ```mermaid
 flowchart TB
-  cliente(["Cliente HTTP<br/>Swagger UI / front-end"])
-  gw(["Gateway de Pagamento<br/>sistema externo"])
+  cliente(["Cliente HTTP<br/>Swagger UI / front-end<br/>(via Kong)"])
+  gw(["Gateway de Pagamento<br/>sistema externo<br/>(via Kong)"])
   kc(["Keycloak<br/>JWKS"])
   db[("PostgreSQL revenda<br/>schemas catalogo e vendas")]
 
@@ -134,7 +153,7 @@ flowchart TB
     end
   end
 
-  prom(["Prometheus / APM<br/>evolução"])
+  prom(["Prometheus do cluster<br/>(APM como evolução)"])
   cliente -->|"HTTP JSON + Bearer"| cat_if
   cliente -->|"HTTP JSON + Bearer"| ven_if
   gw -->|"X-Webhook-Secret"| acl
@@ -168,7 +187,7 @@ flowchart TB
 
 ## 5. Visão de implantação
 
-O ambiente é um cluster **kind** de um nó (control-plane) criado pela CLI `kind` (a partir de `infra/kind/cluster.yaml`) no PC do autor. O cluster é a plataforma compartilhada pelos dois repositórios: cada um gerencia, com Terraform e state próprios, apenas o seu namespace (`revenda` aqui, `identidade` no repositório de identidade), e o CD de cada um cria o cluster se ele faltar ([ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md)). O mesmo PC hospeda os dois runners self-hosted do GitHub Actions (`revenda-runner` e `revenda-runner-identidade`), em containers Linux no Docker Desktop ligados à rede docker `kind` ([ADR-006](adrs/ADR-006-ci-hospedado-cd-self-hosted.md)). Não há Ingress: os serviços são publicados por **NodePort** mapeados para portas do host via `extraPortMappings` do kind ([ADR-005](adrs/ADR-005-kind-terraform-nodeport.md)).
+O ambiente é um cluster **kind** de um nó (control-plane) criado pela CLI `kind` (a partir de `infra/kind/cluster.yaml`) no PC do autor. O cluster é a plataforma compartilhada pelos dois repositórios: cada um gerencia, com Terraform e state próprios, apenas os seus namespaces (`revenda`, `gateway` e `observabilidade` aqui, `identidade` no repositório de identidade), e o CD de cada um cria o cluster se ele faltar ([ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md)). O mesmo PC hospeda os dois runners self-hosted do GitHub Actions (`revenda-runner` e `revenda-runner-identidade`), em containers Linux no Docker Desktop ligados à rede docker `kind` ([ADR-006](adrs/ADR-006-ci-hospedado-cd-self-hosted.md)). Não há Ingress: os serviços são publicados por **NodePort** mapeados para portas do host via `extraPortMappings` do kind ([ADR-005](adrs/ADR-005-kind-terraform-nodeport.md)). A API não tem NodePort: a porta 8080 é do Kong ([ADR-015](adrs/ADR-015-api-gateway-kong.md)).
 
 ```mermaid
 flowchart LR
@@ -188,10 +207,20 @@ flowchart LR
     subgraph KIND["Cluster kind revenda (container Docker do nó control-plane)"]
       subgraph NSR["namespace revenda"]
         dep["Deployment revenda-api<br/>2..5 pods (HPA, CPU 60%)<br/>anotações prometheus.io/scrape"]
-        svcapi["Service revenda-api<br/>NodePort 30080"]
+        svcapi["Service revenda-api<br/>ClusterIP 80"]
         job["Job revenda-migracao<br/>python -m revenda.migracao"]
         stsapi[("StatefulSet revenda-db<br/>postgres:16-alpine + PVC")]
         svcdb["Service revenda-db<br/>5432, NodePort 30432"]
+      end
+      subgraph NSG["namespace gateway"]
+        kong["Deployment kong<br/>DB-less, 1 pod"]
+        svckong["Service kong<br/>NodePort 30080"]
+      end
+      subgraph NSO["namespace observabilidade"]
+        prom["Deployment prometheus<br/>retenção 2d (emptyDir)"]
+        svcprom["Service prometheus<br/>NodePort 30900"]
+        graf["Deployment grafana<br/>painel provisionado"]
+        svcgraf["Service grafana<br/>NodePort 30300"]
       end
       subgraph NSI["namespace identidade (repositório de identidade)"]
         kcdep["Deployment keycloak<br/>1 pod, start-dev"]
@@ -210,14 +239,22 @@ flowchart LR
   repo -->|"push na main: job de CD"| runner
   repoid -->|"push na main: job de CD"| runnerid
   runner -->|"kind create cluster (se faltar) + terraform apply"| NSR
+  runner -->|"terraform apply"| NSG
+  runner -->|"terraform apply"| NSO
   runner --- tfstate
   runner -->|"kind load + kubectl apply"| NSR
   runner -.->|"confere o realm antes do apply"| svckc
   runnerid -->|"kind create cluster (se faltar) + terraform apply"| NSI
   runnerid --- tfstateid
-  browser -->|"localhost:8080"| svcapi
+  browser -->|"localhost:8080"| svckong
   browser -->|"localhost:8180"| svckc
+  browser -->|"localhost:3000 / 9090"| svcgraf
+  browser -.-> svcprom
+  svckong --> kong -->|"rotas publicadas"| svcapi
   svcapi --> dep
+  svcgraf --> graf -->|"PromQL"| svcprom --> prom
+  prom -.->|"scrape /metrics"| dep
+  prom -.->|"scrape :8100"| kong
   dep --> svcdb --> stsapi
   job --> svcdb
   dep -->|"JWKS: keycloak.identidade.svc:8080"| svckc
@@ -227,10 +264,10 @@ flowchart LR
 
 | Elemento | Detalhe |
 |---|---|
-| Mapeamento de portas | host `8080` → nodePort `30080` (API); host `8180` → nodePort `30180` (Keycloak). host `15432` → nodePort `30432` (banco da API, só para demonstração; desligável com `expor_banco_revenda=false`). O banco do Keycloak **não** é exposto |
-| Secrets (Terraform) | Deste repositório: `revenda-db-credentials`, `revenda-webhook-secret` (ns `revenda`). Do repositório de identidade (ns `identidade`): `keycloak-db-credentials`, `keycloak-admin`, `keycloak-gestor`, `keycloak-e2e`; destes, o CD da API lê só os de contrato `keycloak-gestor` e `keycloak-e2e`, para o e2e |
-| NetworkPolicy | `revenda-db` só aceita pods com rótulo `app` igual a `revenda-api` ou `revenda-migracao` (mais o tráfego do NodePort de demonstração). A do `keycloak-db` (só `app=keycloak`) é do repositório de identidade |
-| Observabilidade | Logs JSON em stdout (`kubectl logs`); `GET /metrics` em cada pod, com anotações `prometheus.io/scrape`, `port` e `path` para um Prometheus que venha a ser instalado; metrics-server alimenta o HPA e o `kubectl top`. Não há Prometheus nem APM instalados no cluster nesta entrega ([12-observabilidade.md](12-observabilidade.md)) |
+| Mapeamento de portas | host `8080` → nodePort `30080` (API Gateway Kong); host `8180` → nodePort `30180` (Keycloak); host `3000` → nodePort `30300` (Grafana); host `9090` → nodePort `30900` (Prometheus). host `15432` → nodePort `30432` (banco da API, só para demonstração; desligável com `expor_banco_revenda=false`). O banco do Keycloak **não** é exposto |
+| Secrets (Terraform) | Deste repositório: `revenda-db-credentials`, `revenda-webhook-secret` (ns `revenda`), `kong-config` (ns `gateway`, configuração declarativa com a credencial do consumer `gateway-pagamento`) e `grafana-admin` (ns `observabilidade`). Do repositório de identidade (ns `identidade`): `keycloak-db-credentials`, `keycloak-admin`, `keycloak-gestor`, `keycloak-e2e`; destes, o CD da API lê só os de contrato `keycloak-gestor` e `keycloak-e2e`, para o e2e |
+| NetworkPolicy | `revenda-db` só aceita pods com rótulo `app` igual a `revenda-api` ou `revenda-migracao` (mais o tráfego do NodePort de demonstração). `revenda-api-somente-gateway`: a API (porta 8000) só aceita o Kong (ns `gateway`), o Prometheus (ns `observabilidade`) e o tráfego do nó (probes do kubelet). A do `keycloak-db` (só `app=keycloak`) é do repositório de identidade |
+| Observabilidade | Logs JSON em stdout (`kubectl logs`, inclusive do Kong, com o mesmo `X-Request-ID`); `GET /metrics` em cada pod, com anotações `prometheus.io/scrape`, `port` e `path`, coletado pelo Prometheus do namespace `observabilidade` (descoberta de pods só em `revenda` e `gateway`, por Roles), junto com as métricas do Kong; regras de alerta em `infra/observabilidade/alertas.yml`; painel no Grafana; metrics-server alimenta o HPA e o `kubectl top`. Sem Alertmanager nem APM ([12-observabilidade.md](12-observabilidade.md), [ADR-016](adrs/ADR-016-prometheus-grafana.md)) |
 | Emissor dos tokens | `KC_HOSTNAME=http://localhost:8180`, então `iss = http://localhost:8180/realms/revenda`. A API busca o JWKS pelo endereço interno do Service, mas valida o `iss` público (ver [07-seguranca-lgpd.md](07-seguranca-lgpd.md)) |
 
 ## 6. Diagramas de sequência
@@ -312,14 +349,20 @@ sequenceDiagram
 sequenceDiagram
   autonumber
   participant G as Gateway de Pagamento
+  participant K as API Gateway (Kong)
   participant ACL as Webhook (ACL)
   participant UC as ProcessarPagamento
   participant VR as VendaRepository
   participant P as CatalogoPort
   participant DB as PostgreSQL revenda
 
-  G->>ACL: POST /api/v1/pagamentos/webhook<br/>X-Webhook-Secret: ***<br/>{"codigo_pagamento":"PAG-3f9a1c0b7e21","status":"APROVADO"}
-  ACL->>ACL: Compara segredo em tempo constante
+  G->>K: POST /api/v1/pagamentos/webhook<br/>X-Webhook-Secret: ***<br/>{"codigo_pagamento":"PAG-3f9a1c0b7e21","status":"APROVADO"}
+  K->>K: key-auth (consumer gateway-pagamento) + ACL
+  alt credencial ausente ou inválida
+    K-->>G: 401 do Kong (não chega à API)
+  end
+  K->>ACL: encaminha (mesmo header, X-Request-ID)
+  ACL->>ACL: Compara segredo em tempo constante (defesa em profundidade)
   alt segredo ausente ou inválido
     ACL-->>G: 401 problem+json
   end

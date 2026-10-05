@@ -26,8 +26,9 @@ O bloco 5 depende do tempo real do CI e do CD. Duas formas de manter o vídeo em
 ### Ambiente no ar
 
 - [ ] Docker Desktop iniciado; aplicativos pesados fechados (só o Keycloak tem limite de 1536 MiB de memória; risco R-02 de [10-plano-execucao.md](10-plano-execucao.md)).
-- [ ] Plataforma e API de pé: `kubectl get pods -A` com tudo `Running` (namespaces `revenda`, `identidade`, `kube-system`), e o Job `revenda-migracao` `Completed`.
+- [ ] Plataforma e API de pé: `kubectl get pods -A` com tudo `Running` (namespaces `revenda`, `gateway`, `observabilidade`, `identidade`, `kube-system`), e o Job `revenda-migracao` `Completed`.
 - [ ] `http://localhost:8080/health/ready` responde `{"status":"ok",...}` e `http://localhost:8180/realms/revenda/.well-known/openid-configuration` responde.
+- [ ] `http://localhost:3000` abre o painel "Revenda de Veículos — visão geral" e `http://localhost:9090/targets` mostra os jobs `revenda-api` e `kong` como `UP`.
 - [ ] Último run do CD verde em *Actions > CD*.
 - [ ] Runner `online` em *Settings > Actions > Runners* (container `revenda-runner`; se não estiver, `docker start revenda-runner` ou rode de novo `scripts\windows\03-instalar-runner.ps1`).
 - [ ] Para o bloco 8 (opcional, se for rodar a suíte ao vivo): `.env` criado a partir do `.env.example` e `docker compose up -d postgres` (porta 5432, não conflita com o kind).
@@ -48,6 +49,7 @@ Use os comandos da [seção 11.3](#113-comandos-para-obter-os-segredos-powershel
 |---|---|
 | Navegador A, janela normal (gestor) | Swagger `http://localhost:8080/docs`; GitHub: repositório, *Pull requests*, *Actions*, *Settings > Branches*, *Settings > Actions > Runners*; console admin `http://localhost:8180/admin/` |
 | Navegador A, janela anônima (cliente 1) | Swagger `http://localhost:8080/docs` |
+| Navegador A, janela normal (monitoramento) | Grafana `http://localhost:3000`; Prometheus `http://localhost:9090/alerts` |
 | Navegador B, ou outro perfil (cliente 2) | Swagger `http://localhost:8080/docs`, já autenticado como cliente 2 |
 | VS Code | `docs/02-modelagem-ddd.md` (pré-visualização Markdown com Mermaid), `docs/04-arquitetura.md`, `docs/adrs/README.md`, `infra/terraform/`, `infra/kind/cluster.yaml` |
 | Terminal PowerShell | Na raiz do repositório, com a função `Segredo` já definida |
@@ -150,7 +152,7 @@ kubectl get statefulsets,svc -n revenda
 kubectl get statefulsets,svc -n identidade
 ```
 
-Depois, no VS Code: `infra/kind/cluster.yaml` (portas 8080, 8180 e 15432) e a pasta `infra/terraform` (`secrets.tf`, `postgres.tf`, `keycloak.tf`). No terminal, o state (fora do repositório):
+Depois, no VS Code: `infra/kind/cluster.yaml` (portas 8080, 8180, 15432, 3000 e 9090) e a pasta `infra/terraform` (`secrets.tf`, `postgres.tf`, `gateway.tf`, `observabilidade.tf`). No terminal, o state (fora do repositório):
 
 ```powershell
 $env:TF_DATA_DIR = "$($env:USERPROFILE -replace '\\','/')/.revenda/terraform-data"
@@ -208,6 +210,25 @@ Se sobrar tempo: `GET /api/v1/veiculos/a-venda` de novo (o Argo não aparece mai
 > A cliente compra o Argo. A resposta é 201: a venda está aguardando pagamento, com um código de pagamento e prazo de 30 minutos. O veículo fica reservado e o preço está congelado. Se outro cliente tenta comprar o mesmo carro, recebe 409: veículo indisponível. Isso é garantido no banco, por um UPDATE condicional e um índice único parcial.
 > Agora faço o papel do gateway de pagamento: ele chama o webhook com o código e o resultado APROVADO, autenticado por um segredo compartilhado no header. A venda é efetivada e o veículo passa a vendido. Ele aparece na lista de vendidos, também ordenada por preço, e a cliente vê a compra efetivada em minhas compras.
 
+### Trecho opcional — API Gateway e monitoramento (cerca de 1 min, no fim do bloco 6 ou com corte)
+
+**Tela**: terminal (Git Bash) e, depois, o navegador no Grafana e no Prometheus.
+
+```bash
+# Cabeçalhos do Kong: limite por IP, saldo, correlação e o próprio gateway
+curl -s -D - -o /dev/null http://localhost:8080/api/v1/veiculos/a-venda | grep -iE 'ratelimit|x-request-id|via'
+# Webhook sem a credencial: barrado na borda (401 do Kong, sem X-Kong-Upstream-Latency)
+curl -s -i -X POST http://localhost:8080/api/v1/pagamentos/webhook -H "Content-Type: application/json" \
+  -d '{"codigo_pagamento":"PAG-000000000000","status":"APROVADO"}' | head -n 12
+# /metrics não é publicado pelo gateway
+curl -s -o /dev/null -w "%{http_code}\n" http://localhost:8080/metrics      # 404
+```
+
+Depois: `http://localhost:3000` (linhas Negócio, API e Kong, com a venda que acabou de ser efetivada e o 401 em "Barradas na borda") e `http://localhost:9090/alerts` (as 8 regras, em `inactive` ou `firing`).
+
+**Fala sugerida**:
+> Na frente da API há um API Gateway, o Kong, em modo declarativo: a configuração está versionada no repositório e é validada no CI. Ele é a única entrada: limita requisições por IP, com limite menor na compra, gera o X-Request-ID e só deixa o webhook passar com a credencial do gateway de pagamento; sem ela, a resposta 401 vem do próprio Kong, e a API valida o segredo de novo. O /metrics nem é publicado. As métricas da API e do Kong vão para um Prometheus no cluster, e o Grafana mostra o painel de negócio e os golden signals. As regras de alerta também estão no repositório, com testes no CI.
+
 ### Bloco 7 — Prova da separação de dados (10:00 a 10:50)
 
 **Tela e comandos** (PowerShell, com `$env:PGPASSWORD` definido na [seção 11.3](#113-comandos-para-obter-os-segredos-powershell)):
@@ -246,7 +267,7 @@ uv run lint-imports
 
 ### Bloco 9 — Encerramento (11:30 a 12:00)
 
-**Tela**: README no GitHub, seção "2.10 Documentação" (tabela de docs e ADRs).
+**Tela**: README no GitHub, seção "2.12 Documentação" (tabela de docs e ADRs).
 
 **Fala sugerida**:
 > Resumindo: uma API com cadastro e edição de veículos, compra por clientes cadastrados num serviço de identidade separado, efetivação por webhook de pagamento e listagens ordenadas por preço, com proteção contra venda dupla e expiração de reservas. A infraestrutura é código, o deploy é automático a cada merge e o fluxo ponta a ponta é testado no próprio pipeline. Toda a documentação, a modelagem e os ADRs estão no repositório. Obrigado.
@@ -259,6 +280,8 @@ uv run lint-imports
 | O CD fica em *Queued* | Runner offline: `docker ps --filter name=revenda-runner`; se parado, `docker start revenda-runner` |
 | CD falhou no e2e | Abrir o passo "Diagnostico em falha"; reexecutar com *Re-run jobs* ou *Actions > CD > Run workflow* |
 | Cadastro no Keycloak recusa o CPF | O campo exige exatamente 11 dígitos, sem pontos nem traço |
-| Webhook responde 401 | Segredo errado ou não informado em **Authorize** > `webhook` |
+| Webhook responde 401 | Segredo errado ou não informado em **Authorize** > `webhook` (com o gateway, a resposta vem do Kong: `{"message": ...}`) |
+| Resposta 429 do Kong | Limite por IP excedido (600/min em `/api/v1`, 60/min na compra): espere o minuto virar (cabeçalho `Retry-After`) |
+| Grafana ou Prometheus não abrem (3000/9090) | Cluster criado antes das novas portas: recriar (README, seção 9); ou `kubectl -n observabilidade get pods` |
 | Webhook responde 409 `reserva-expirada` | Passaram 30 minutos desde a compra: refaça a compra com outro veículo |
 | `psql` não conecta em 15432 | Use a alternativa com `kubectl exec` do bloco 7 |

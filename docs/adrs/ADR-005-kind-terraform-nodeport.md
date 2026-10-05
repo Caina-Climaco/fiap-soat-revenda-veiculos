@@ -1,7 +1,7 @@
 # ADR-005: Kubernetes local (kind via CLI) com plataforma provisionada por Terraform, NodePort sem Ingress
 
 **Status:** Aceito
-**Atualizado por:** [ADR-014](ADR-014-identidade-em-repositorio-proprio.md)
+**Atualizado por:** [ADR-014](ADR-014-identidade-em-repositorio-proprio.md), [ADR-015](ADR-015-api-gateway-kong.md), [ADR-016](ADR-016-prometheus-grafana.md)
 **Data:** 2026-10-03
 
 ## Contexto
@@ -62,3 +62,10 @@ Atualizado por [ADR-014](ADR-014-identidade-em-repositorio-proprio.md). O cluste
 - O namespace `identidade` (Keycloak, `keycloak-db`, segredos, NetworkPolicy do `keycloak-db`, Job `keycloak-reconciliar`) é gerenciado pelo Terraform do repositório de identidade, com o state `%USERPROFILE%\.revenda\identidade.tfstate`.
 - A porta 8180 → NodePort 30180 continua no `cluster.yaml`, mas o Service que a usa é implantado pelo repositório de identidade.
 - O script `05-destruir-ambiente.ps1` deste repositório faz `terraform destroy` só da API; o cluster só é apagado com `-ApagarCluster` (o que derruba também a identidade). O `-Recriar` do script 04 foi removido: para recriar do zero, use o 05 com `-ApagarCluster` e suba de novo na ordem identidade → API.
+
+## Atualização (ADR-015 e ADR-016, 2026-10-05)
+
+- A porta 8080 → NodePort 30080 passou a ser do **API Gateway** (Service `kong`, namespace `gateway`, [ADR-015](ADR-015-api-gateway-kong.md)). O Service `revenda-api` virou **ClusterIP** e só o Kong (e o Prometheus) chegam nele.
+- Duas portas novas no `cluster.yaml`: 3000 → NodePort 30300 (Grafana) e 9090 → NodePort 30900 (Prometheus), ambos no namespace `observabilidade` ([ADR-016](ADR-016-prometheus-grafana.md)).
+- O Terraform deste repositório passa a gerenciar também os namespaces `gateway` e `observabilidade`.
+- O kind não acrescenta portas a um cluster existente: quem já tinha o cluster precisa recriá-lo (README, seção "Migração para o API Gateway e o monitoramento").
