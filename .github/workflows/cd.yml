@@ -294,6 +294,20 @@ jobs:
           curl -fsS --max-time 5 "${GRAFANA_URL}/api/health" >/dev/null
           titulo="$(curl -fsS --max-time 5 "${GRAFANA_URL}/api/dashboards/uid/revenda-visao-geral" | jq -r '.dashboard.title')"
           echo "OK: Grafana com o painel '${titulo}'"
+          # O painel so serve se o Grafana consegue consultar o Prometheus (plugin registrado e
+          # fonte de dados alcancavel): mesma consulta que um painel faz, como Viewer anonimo.
+          corpo='{"queries":[{"refId":"A","datasource":{"type":"prometheus","uid":"prometheus"},"expr":"count(up == 1)","instant":true}],"from":"now-5m","to":"now"}'
+          for _ in $(seq 1 24); do
+            resposta="$(curl -sS --max-time 10 -H 'Content-Type: application/json' -d "$corpo" "${GRAFANA_URL}/api/ds/query" || true)"
+            valor="$(printf '%s' "$resposta" | jq -r '.results.A.frames[0].data.values[1][0] // empty' 2>/dev/null || true)"
+            [ -n "$valor" ] && [ "$valor" != "0" ] && break
+            sleep 5
+          done
+          if [ -z "${valor:-}" ] || [ "$valor" = "0" ]; then
+            echo "::error::Grafana nao consulta o Prometheus: ${resposta:0:300}"
+            exit 1
+          fi
+          echo "OK: Grafana consulta o Prometheus (${valor} alvos up)"
 
       - name: Python 3.12 para o e2e
         # python3 da imagem do runner (Ubuntu 24.04); sem actions/setup-python
