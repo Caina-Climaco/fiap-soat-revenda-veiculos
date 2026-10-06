@@ -9,7 +9,7 @@ from datetime import datetime, timedelta
 from uuid import UUID
 
 from revenda.shared.clock import Clock
-from revenda.shared.paginacao import Pagina
+from revenda.shared.paginacao import LIMITE_VARREDURA_EXPIRADAS, Pagina
 from revenda.shared.uow import UnidadeDeTrabalho
 from revenda.vendas.application.portas import CatalogoPort, GeradorCodigoPagamento
 from revenda.vendas.domain.erros import (
@@ -33,9 +33,6 @@ from revenda.vendas.domain.venda import (
 )
 
 _logger = logging.getLogger("revenda.vendas")
-
-# Quantas reservas vencidas cada leitura cancela antes de consultar (mesmo teto da vitrine).
-LIMITE_VARREDURA_EXPIRADAS = 100
 
 
 @dataclass(frozen=True, slots=True)

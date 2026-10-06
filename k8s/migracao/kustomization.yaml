@@ -1,4 +1,4 @@
-# Job de migracao (alembic upgrade head), aplicado pelo CD ANTES do rollout da API.
+# Job de migracao (python -m revenda.migracao), aplicado pelo CD ANTES do rollout da API.
 # Autossuficiente: nao depende do ConfigMap de k8s/base (no primeiro deploy ele ainda
 # nao existe quando a migracao roda).
 apiVersion: kustomize.config.k8s.io/v1beta1

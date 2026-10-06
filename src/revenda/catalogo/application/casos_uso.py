@@ -12,10 +12,8 @@ from revenda.catalogo.domain.erros import ConflitoConcorrenciaError, VeiculoNaoE
 from revenda.catalogo.domain.repositorio import VeiculoRepository
 from revenda.catalogo.domain.veiculo import StatusVeiculo, Veiculo
 from revenda.shared.clock import Clock
-from revenda.shared.paginacao import Pagina
+from revenda.shared.paginacao import LIMITE_VARREDURA_EXPIRADAS, Pagina
 from revenda.shared.uow import UnidadeDeTrabalho
-
-LIMITE_VARREDURA_EXPIRADAS = 100
 
 
 class ExpiradorReservas(Protocol):

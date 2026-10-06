@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
 from uuid import UUID
 
 from apoio.fakes import UowFalsa, VeiculoRepoMemoria, VendaRepoMemoria
@@ -48,9 +47,6 @@ class Cenario:
 
     def status_veiculo(self, veiculo_id: UUID) -> StatusVeiculo:
         return self.veiculos.dados[veiculo_id].status
-
-    def preco_veiculo(self, veiculo_id: UUID) -> Decimal:
-        return self.veiculos.dados[veiculo_id].preco
 
     def iniciar_compra(self) -> IniciarCompra:
         return IniciarCompra(self.vendas, self.catalogo, self.uow, self.relogio, ttl_reserva=TTL)

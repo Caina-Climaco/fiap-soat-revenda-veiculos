@@ -1,5 +1,5 @@
 # Imagem da revenda-api (contrato da seção 14.1 do design brief).
-# - A mesma imagem serve a API (CMD padrão) e o Job de migração (`alembic upgrade head`,
+# - A mesma imagem serve a API (CMD padrão) e o Job de migração (`python -m revenda.migracao`,
 #   executado em /app, onde ficam alembic.ini e migrations/).
 # - Usuário não-root 10001:10001; nada é escrito no FS raiz em execução (bytecode
 #   compilado no build e PYTHONDONTWRITEBYTECODE=1), então funciona com

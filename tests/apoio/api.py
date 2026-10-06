@@ -32,15 +32,13 @@ class Api:
         ano: int = 2022,
         cor: str = "Prata",
         preco: str = "72000.00",
-        *,
-        status_esperado: int = 201,
     ) -> dict[str, Any]:
         resposta = self.http.post(
             "/api/v1/veiculos",
             json={"marca": marca, "modelo": modelo, "ano": ano, "cor": cor, "preco": preco},
             headers=self.gestor,
         )
-        assert resposta.status_code == status_esperado, resposta.text
+        assert resposta.status_code == 201, resposta.text
         corpo: dict[str, Any] = resposta.json()
         return corpo
 

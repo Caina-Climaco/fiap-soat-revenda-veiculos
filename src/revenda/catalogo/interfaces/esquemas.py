@@ -71,7 +71,6 @@ Preco = Annotated[
             "sempre trazem string."
         ),
         examples=["79900.00"],
-        json_schema_extra={"example": "79900.00"},
     ),
 ]
 

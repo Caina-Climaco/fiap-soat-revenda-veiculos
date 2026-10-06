@@ -6,7 +6,7 @@
 # .terraform.lock.hcl (gerado no primeiro `terraform init`) deve ser versionado.
 
 terraform {
-  required_version = ">= 1.9.0"
+  required_version = ">= 1.16.0"
 
   required_providers {
     # Namespace, Secrets, StatefulSet, Service e NetworkPolicy
