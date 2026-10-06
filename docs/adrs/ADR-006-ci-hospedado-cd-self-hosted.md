@@ -55,6 +55,43 @@ O time de qualidade exige que toda implantação ou alteração passe por CI/CD 
 - O job registra o resultado no resumo da execução.
 - Aprovações exigidas = 0, mas CI verde obrigatório e checklist no template de PR. A decisão fica registrada aqui.
 
+## Risco: runner self-hosted em repositório público
+
+Esta seção detalha o risco listado nas consequências negativas, o que o contém hoje e o que mudaria em produção. Ela existe porque o GitHub desaconselha runners self-hosted em repositórios públicos e este repositório é público (`scripts/windows/02-criar-repositorio.ps1`, linha 25: `gh repo create ... --public`).
+
+### O que está em jogo
+
+Quem consegue executar um job no runner controla o Docker Desktop do PC do autor:
+
+- o container do runner recebe o socket do Docker do host (`scripts/windows/03-instalar-runner.ps1`, linha 180: `-v /var/run/docker.sock:/var/run/docker.sock`). Com o socket, qualquer processo do job pode criar containers privilegiados, montar o sistema de arquivos da VM do Docker Desktop, ler ou parar o nó do kind (`revenda-control-plane`), o runner do repositório de identidade e qualquer outro container do PC;
+- o usuário `runner` (UID 1001) tem `sudo` sem senha dentro do container (`infra/runner/Dockerfile`, linhas 3 e 70; `infra/runner/entrypoint.sh`, linhas 39 a 44, usa `sudo groupadd`, `sudo usermod` e `sudo -E -H -u runner`). Não rodar como root limita acidentes, não um atacante: o `sudo` e o socket dão, na prática, controle total do container e do Docker do host;
+- o container também monta `%USERPROFILE%\.revenda` em `/revenda-state` (`03-instalar-runner.ps1`, linha 182), onde ficam os states do Terraform dos dois repositórios, com os segredos em texto claro ([ADR-011](ADR-011-segredos-terraform.md)); está na rede docker `kind` (linha 179) e alcança o cluster pelo nome do nó.
+
+O vetor clássico é um PR de fork com um workflow modificado: se um workflow com `runs-on: self-hosted` reagisse a `pull_request`, o código do PR rodaria no runner antes de qualquer revisão.
+
+### O que já contém o risco
+
+| Controle | Onde está |
+|---|---|
+| O CD só dispara em `push` na `main` (PR já mergeado) e em `workflow_dispatch`; nenhum workflow self-hosted reage a `pull_request` | `.github/workflows/cd.yml`, linhas 15 a 24 (`on:`) e 40 (`runs-on: [self-hosted, Linux, kind-local]`); `ci.yml` usa apenas `ubuntu-latest` (linhas 34, 70, 127, 210 e 344) |
+| No disparo manual, o primeiro passo recusa qualquer `ref` que não seja ancestral de `origin/main`; vale também quando o disparo é feito "a partir de" outra branch | `cd.yml`, linhas 72 a 84 (`git merge-base --is-ancestor "$SHA" origin/main`) |
+| Workflows de PRs de forks só rodam com aprovação do dono do repositório | `02-criar-repositorio.ps1`, linha 54: `fork-pr-contributor-approval` com `approval_policy=all_external_contributors` |
+| `main` protegida: PR obrigatório, checks `qualidade`, `testes`, `imagem` e `infra` obrigatórios com a branch atualizada, histórico linear, sem force push nem exclusão, regra aplicada também a administradores | `02-criar-repositorio.ps1`, linhas 35 a 49 (`required_status_checks`, `enforce_admins: true`) |
+| O CI de PR roda só no runner hospedado: código não revisado nunca toca o PC | `ci.yml` (todos os jobs em `ubuntu-latest`) |
+| O job não recebe segredos do GitHub: o `GITHUB_TOKEN` tem só `contents: read` e o checkout não persiste a credencial; os segredos do e2e são lidos do cluster na hora e mascarados no log | `cd.yml`, linhas 26 e 27 (`permissions`), 65 (`persist-credentials: false`) e 357 a 372 (`kubectl get secret` + `::add-mask::`) |
+| Runner registrado só neste repositório, com a label `kind-local`; o repositório de identidade tem o próprio runner | `03-instalar-runner.ps1`, linhas 22, 25 e 167 (token de registro do repositório) |
+
+Juntas, essas regras fazem com que só código já revisado por PR, aprovado pelo CI e mergeado na `main` chegue ao runner. O que permanece é o risco residual de um merge malicioso ou de uma ação do GitHub comprometida usada pelo `cd.yml` (hoje só `actions/checkout`, fixada pelo SHA do commit da v7.0.1, como todas as `uses:` dos workflows; [08-ci-cd-infra.md](../08-ci-cd-infra.md), "Actions fixadas por SHA"), e a dependência da configuração do repositório, que não é versionada (é aplicada pelo script 02 e pode ser alterada pela interface do GitHub).
+
+### O que seria feito em produção
+
+- **Runner efêmero, um por job** (`--ephemeral`), em VM ou container descartado ao fim de cada execução, para que nada sobreviva de um job para o próximo; hoje o container é persistente (`--restart unless-stopped`) e reaproveita o registro no volume `revenda-runner-persist`.
+- **Sem socket do Docker no runner**: a imagem seria construída e publicada num registry pelo CI hospedado, e o CD só faria `kubectl`/`terraform` com uma credencial restrita ao namespace (o `kind load` deixa de existir, [ADR-010](ADR-010-kind-load-sem-registry.md)); o usuário do runner não teria `sudo`.
+- **Repositório privado**, ou `environment` `local` com *required reviewers* e restrição a branches protegidas (o environment já existe, `02-criar-repositorio.ps1`, linha 58, mas sem regras de proteção), para que um deploy exija uma aprovação explícita além do merge.
+- Configuração do repositório como código (por exemplo, *rulesets* versionados). O *pinning* das ações por SHA já está feito nos dois workflows.
+
+No ambiente desta entrega, esses pontos foram trocados pelas restrições acima, com o PC do autor como única máquina afetada; a escolha está registrada como consequência negativa aceita.
+
 ## Atualização (ADR-014, 2026-10-04)
 
 Atualizado por [ADR-014](ADR-014-identidade-em-repositorio-proprio.md). O modelo (CI hospedado, CD self-hosted em container) continua o mesmo, agora replicado em dois repositórios:

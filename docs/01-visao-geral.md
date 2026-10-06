@@ -50,7 +50,8 @@ Entregar uma API REST funcional, testada e implantada de forma automatizada que 
 | Integração com provedor de pagamento real, estorno e conciliação | Pagamento é simulado por webhook; o resultado chega como chamada HTTP autenticada |
 | Financiamento, consórcio, troca, proposta e negociação de preço | Não pedidos no enunciado |
 | Emissão de nota fiscal, transferência de documentação (DETRAN), entrega do veículo | Processos pós-venda fora do sistema |
-| Fotos, opcionais, quilometragem e busca com filtros avançados | Não pedidos; o modelo admite extensão futura |
+| Placa, chassi, RENAVAM, quilometragem e documentação do veículo | O enunciado define o veículo pelos cinco campos marca, modelo, ano, cor e preço, e só eles entram no modelo; a identidade do veículo no sistema é o `id` (UUID), não um identificador civil. Placa, chassi e RENAVAM entram quando houver integração com o DETRAN ou transferência de propriedade, citada como evolução em [07-seguranca-lgpd.md](07-seguranca-lgpd.md), seção 5.7 (RN-20 em [02-modelagem-ddd.md](02-modelagem-ddd.md)) |
+| Fotos, opcionais e busca com filtros avançados | Não pedidos; o modelo admite extensão futura |
 | Múltiplas lojas ou filiais | Uma única revenda |
 | Notificações (e-mail, SMS, push) | Não pedidas |
 | Funções Serverless (Lambda, SAM, Cognito) e API Gateway gerenciado (Azure APIM, AWS API Gateway) | Sem conta de nuvem; Serverless e onde entraria em [ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md); o gateway entregue é o Kong local ([ADR-015](adrs/ADR-015-api-gateway-kong.md)) |

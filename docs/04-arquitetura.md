@@ -266,7 +266,7 @@ flowchart LR
 |---|---|
 | Mapeamento de portas | host `8080` → nodePort `30080` (API Gateway Kong); host `8180` → nodePort `30180` (Keycloak); host `3000` → nodePort `30300` (Grafana); host `9090` → nodePort `30900` (Prometheus). host `15432` → nodePort `30432` (banco da API, só para demonstração; desligável com `expor_banco_revenda=false`). O banco do Keycloak **não** é exposto |
 | Secrets (Terraform) | Deste repositório: `revenda-db-credentials`, `revenda-webhook-secret` (ns `revenda`), `kong-config` (ns `gateway`, configuração declarativa com a credencial do consumer `gateway-pagamento`) e `grafana-admin` (ns `observabilidade`). Do repositório de identidade (ns `identidade`): `keycloak-db-credentials`, `keycloak-admin`, `keycloak-gestor`, `keycloak-e2e`; destes, o CD da API lê só os de contrato `keycloak-gestor` e `keycloak-e2e`, para o e2e |
-| NetworkPolicy | `revenda-db` só aceita pods com rótulo `app` igual a `revenda-api` ou `revenda-migracao` (mais o tráfego do NodePort de demonstração). `revenda-api-somente-gateway`: a API (porta 8000) só aceita o Kong (ns `gateway`), o Prometheus (ns `observabilidade`) e o tráfego do nó (probes do kubelet). A do `keycloak-db` (só `app=keycloak`) é do repositório de identidade |
+| NetworkPolicy | `revenda-db` só aceita pods com rótulo `app` igual a `revenda-api`, `revenda-migracao` ou `revenda-saneamento` (mais o tráfego do NodePort de demonstração). `revenda-api-somente-gateway`: a API (porta 8000) só aceita o Kong (ns `gateway`), o Prometheus (ns `observabilidade`) e o tráfego do nó (probes do kubelet). A do `keycloak-db` (só `app=keycloak`) é do repositório de identidade |
 | Observabilidade | Logs JSON em stdout (`kubectl logs`, inclusive do Kong, com o mesmo `X-Request-ID`); `GET /metrics` em cada pod, com anotações `prometheus.io/scrape`, `port` e `path`, coletado pelo Prometheus do namespace `observabilidade` (descoberta de pods só em `revenda` e `gateway`, por Roles), junto com as métricas do Kong; regras de alerta em `infra/observabilidade/alertas.yml`; painel no Grafana; metrics-server alimenta o HPA e o `kubectl top`. Sem Alertmanager nem APM ([12-observabilidade.md](12-observabilidade.md), [ADR-016](adrs/ADR-016-prometheus-grafana.md)) |
 | Emissor dos tokens | `KC_HOSTNAME=http://localhost:8180`, então `iss = http://localhost:8180/realms/revenda`. A API busca o JWKS pelo endereço interno do Service, mas valida o `iss` público (ver [07-seguranca-lgpd.md](07-seguranca-lgpd.md)) |
 
@@ -463,7 +463,7 @@ sequenceDiagram
   end
 ```
 
-Além desses gatilhos, a listagem `GET /api/v1/veiculos/a-venda` executa, antes da consulta, uma **varredura preguiçosa** limitada (até 100 vendas expiradas por chamada), para que veículos com reserva vencida voltem a aparecer na vitrine mesmo que ninguém tente comprá-los diretamente. As demais leituras (`GET /api/v1/veiculos/{id}`, `GET /api/v1/vendas/{id}`, `GET /api/v1/vendas/minhas` e `GET /api/v1/vendas`) também aplicam a expiração antes de responder, para nenhuma leitura mostrar reserva vencida como ativa. O cancelamento e a liberação usam os mesmos UPDATEs condicionais, portanto são seguros sob concorrência e idempotentes.
+Além desses gatilhos, a listagem `GET /api/v1/veiculos/a-venda` executa, antes da consulta, uma **varredura preguiçosa** limitada (até 100 vendas expiradas por chamada), para que veículos com reserva vencida voltem a aparecer na vitrine mesmo que ninguém tente comprá-los diretamente. As demais leituras (`GET /api/v1/veiculos/{id}`, `GET /api/v1/vendas/{id}`, `GET /api/v1/vendas/minhas` e `GET /api/v1/vendas`) também aplicam a expiração antes de responder, para nenhuma leitura mostrar reserva vencida como ativa. O cancelamento e a liberação usam os mesmos UPDATEs condicionais, portanto são seguros sob concorrência e idempotentes. Como segunda linha de defesa, o CronJob `revenda-saneamento` (`python -m revenda.expirar`, a cada 10 min) executa o mesmo caso de uso `ExpirarReservasVencidas` em lotes, para que reservas vencidas que ninguém consultou não fiquem como ativas no banco ([ADR-009](adrs/ADR-009-expiracao-preguicosa.md); [08-ci-cd-infra.md](08-ci-cd-infra.md), seção 2.5).
 
 ## 7. Visão de baixo nível (LLD)
 
@@ -498,6 +498,7 @@ fiap-soat-revenda-veiculos/
 │   │   └── interfaces/      # routers /vendas e /pagamentos/webhook (ACL)
 │   ├── composicao.py        # único lugar que conhece Catálogo e Vendas: liga repositórios, UoW, CatalogoAdapter e casos de uso
 │   ├── migracao.py          # migração tolerante a rollback (python -m revenda.migracao, Job do Kubernetes)
+│   ├── expirar.py           # saneamento das reservas vencidas (python -m revenda.expirar, CronJob; ADR-009)
 │   └── main.py              # app factory: monta routers, handlers, middleware e /metrics
 ├── migrations/              # Alembic (env.py, versions/)
 ├── tests/{unit,integration,e2e,carga}
@@ -507,7 +508,7 @@ fiap-soat-revenda-veiculos/
 │   ├── kong/                # kong.yml.tftpl (configuração declarativa do gateway)
 │   ├── observabilidade/     # prometheus.yml, alertas.yml (+ testes), provisionamento e painel do Grafana
 │   └── runner/              # imagem do runner self-hosted do CD
-└── k8s/{base,migracao}/
+└── k8s/{base,migracao,saneamento}/
 ```
 
 ### 7.2 Responsabilidades por camada

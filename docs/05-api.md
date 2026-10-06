@@ -45,6 +45,8 @@ No ambiente kind, toda requisição passa pelo Kong antes de chegar à API ([ADR
 | `documentacao` | `GET /docs`, `GET /openapi.json` | — |
 | `saude` | `GET /health/*` | — |
 
+> **"Por IP" no ambiente kind.** O tráfego do host entra por `127.0.0.1:8080` → porta 30080 do nó (`extraPortMappings` do kind) → Service NodePort do Kong, e o kube-proxy faz SNAT nesse caminho: o Kong enxerga o mesmo endereço de origem para todos os clientes. Na prática, os limites de 600/min e 60/min são **globais** para o ambiente local: um cliente consome a cota dos outros, e um teste de carga pelo gateway recebe 429 em segundos (ver `tests/carga/README.md` para elevar o limite durante a medição). Em produção, o limite por cliente real exige um balanceador que preserve o IP de origem com `real_ip_header`/`trusted_ips` no Kong, ou `limit_by: consumer` nas rotas autenticadas ([ADR-015](adrs/ADR-015-api-gateway-kong.md), consequências negativas).
+
 - **Cabeçalhos de limite**: as respostas das rotas `api` e `compra` trazem `RateLimit-Limit`, `RateLimit-Remaining` e `RateLimit-Reset` (e os equivalentes `X-RateLimit-Limit-Minute` e `X-RateLimit-Remaining-Minute`). Acima do limite, o próprio Kong responde **429** com `{"message": "API rate limit exceeded"}` e o cabeçalho `Retry-After`; a requisição não chega à API.
 - **Payload**: corpo acima de 1 MB → **413** do Kong.
 - **Caminho sem rota** (por exemplo, `/metrics`) → **404** do Kong, `{"message": "no Route matched with those values"}`.

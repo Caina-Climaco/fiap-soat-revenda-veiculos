@@ -44,7 +44,7 @@ As versões dos providers são fixadas em `versions.tf` (`required_providers` co
 | `random_password` | `revenda_db` (32 caracteres), `webhook_secret` (48; a API exige no mínimo 16), `grafana_admin` (24) |
 | `kubernetes_secret` | `revenda-db-credentials` e `revenda-webhook-secret` (ns `revenda`); `kong-config` (ns `gateway`); `grafana-admin` (ns `observabilidade`) |
 | PostgreSQL da API | StatefulSet `revenda-db` (`postgres:16.15-alpine`, PVC 1 Gi) + Service `revenda-db`: **NodePort 30432 por padrão** (`expor_banco_revenda = true`, publicado no host em `127.0.0.1:15432` para a demonstração do banco); ClusterIP com `expor_banco_revenda = false` |
-| `kubernetes_network_policy` | `revenda-db` aceita só pods com rótulo `app` igual a `revenda-api` ou `revenda-migracao` (mais o tráfego do NodePort quando `expor_banco_revenda = true`). `revenda-api-somente-gateway` (`network_policies.tf`): a API (porta 8000) aceita só pods `app=kong` do ns `gateway`, `app=prometheus` do ns `observabilidade` e o tráfego do nó (probes do kubelet) |
+| `kubernetes_network_policy` | `revenda-db` aceita só pods com rótulo `app` igual a `revenda-api`, `revenda-migracao` ou `revenda-saneamento` (mais o tráfego do NodePort quando `expor_banco_revenda = true`). `revenda-api-somente-gateway` (`network_policies.tf`): a API (porta 8000) aceita só pods `app=kong` do ns `gateway`, `app=prometheus` do ns `observabilidade` e o tráfego do nó (probes do kubelet) |
 | API Gateway (`gateway.tf`) | Kong `kong:3.9.3` em modo DB-less (Deployment `kong`, 1 réplica, não root, raiz somente leitura). Configuração declarativa: `templatefile` de `infra/kong/kong.yml.tftpl` (com `webhook_secret`, `kong_limite_geral_minuto` = 600 e `kong_limite_compra_minuto` = 60) num Secret `kong-config`; o *hash* da configuração anotado no pod reinicia o Kong quando ela muda. Service `kong` **NodePort 30080** (proxy) e `kong-status` ClusterIP 8100 (status e métricas). Admin API só em `127.0.0.1:8001` |
 | Monitoramento (`observabilidade.tf`) | Prometheus `prom/prometheus:v3.14.0` (Deployment, ServiceAccount `prometheus`, Roles `prometheus-leitura-pods` nos ns `revenda` e `gateway`, ConfigMap `prometheus-config` com `infra/observabilidade/prometheus.yml` e `alertas.yml`, retenção 2 dias em `emptyDir`, Service **NodePort 30900**). Grafana `grafana/grafana:13.2.3` (Deployment, ConfigMaps `grafana-provisionamento` e `grafana-paineis` com os arquivos de `infra/observabilidade/grafana/`, Secret `grafana-admin`, acesso anônimo Viewer, Service **NodePort 30300**) |
 
@@ -95,9 +95,12 @@ k8s/
 │   ├── deployment.yaml
 │   ├── service.yaml         # ClusterIP 80 -> porta http (8000); a entrada pelo host é o Kong
 │   └── hpa.yaml
-└── migracao/
+├── migracao/
+│   ├── kustomization.yaml
+│   └── job.yaml             # revenda-migracao: python -m revenda.migracao (seção 2.4)
+└── saneamento/
     ├── kustomization.yaml
-    └── job.yaml             # revenda-migracao: python -m revenda.migracao (seção 2.4)
+    └── cronjob.yaml         # revenda-saneamento: python -m revenda.expirar a cada 10 min (seção 2.5)
 ```
 
 No repositório a imagem tem a tag neutra `revenda-api:dev`. O CD **não** commita a tag do deploy: renderiza os manifestos com `kubectl kustomize`, troca `revenda-api:dev` por `revenda-api:<sha>` com `sed` num arquivo temporário e aplica esse arquivo com `kubectl apply -f`. O CI renderiza com o mesmo `kubectl kustomize` e valida o resultado com `kubeconform -strict`.
@@ -137,6 +140,24 @@ O Job é **tolerante a rollback**. Antes de migrar, ele compara a revisão grava
 
 Assim, reimplantar um SHA anterior não falha na migração: o schema mais novo permanece e, como as migrações seguem *expand/contract* ([06-dados.md](06-dados.md), seção 5.3), o código anterior continua compatível com ele. Detalhes em [06-dados.md](06-dados.md), seção 5.
 
+### 2.5 CronJob de saneamento das reservas vencidas
+
+`revenda-saneamento`: segunda linha de defesa da expiração preguiçosa ([ADR-009](adrs/ADR-009-expiracao-preguicosa.md)). A API continua aplicando a expiração em cada escrita e leitura (é isso que garante a correção das respostas); o CronJob só antecipa o cancelamento das reservas que ninguém consultou, para que relatórios que leem o banco diretamente não vejam reservas vencidas como ativas por mais de alguns minutos.
+
+| Item | Valor |
+|---|---|
+| Comando | `python -m revenda.expirar` (`src/revenda/expirar.py`): reutiliza o caso de uso `ExpirarReservasVencidas` das leituras da API; cancela em lotes de `SANEAMENTO_LOTE` (padrão 100, cada lote numa transação própria) até não sobrar reserva vencida ou atingir `SANEAMENTO_TETO` (padrão 1000) por execução; o que sobrar fica para a execução seguinte. Log JSON em stdout (`logger: revenda.expirar`, campos `canceladas`, `lotes`, `teto_atingido`); sai com 0 quando o banco respondeu |
+| Agenda | `schedule: "*/10 * * * *"` (`timeZone: Etc/UTC`), `concurrencyPolicy: Forbid` (nunca duas execuções ao mesmo tempo), `startingDeadlineSeconds: 300`, `successfulJobsHistoryLimit: 1`, `failedJobsHistoryLimit: 3` |
+| Job gerado | `backoffLimit: 2`, `activeDeadlineSeconds: 300`, `ttlSecondsAfterFinished: 600`, `restartPolicy: Never` |
+| Imagem | a mesma da API (`revenda-api:<sha>`), container `saneamento`, `imagePullPolicy: IfNotPresent`, `workingDir: /app` |
+| Segurança | mesmo `securityContext` do Job de migração (`runAsNonRoot`, `runAsUser: 10001`, `readOnlyRootFilesystem`, `allowPrivilegeEscalation: false`, `capabilities.drop: [ALL]`, `seccompProfile: RuntimeDefault`), `automountServiceAccountToken: false`, `enableServiceLinks: false`, `emptyDir` em `/tmp` (64Mi) |
+| Recursos | `requests: cpu 50m, memory 96Mi`; `limits: cpu 250m, memory 192Mi` |
+| Env | autossuficiente como a migração: `DB_HOST`/`DB_PORT` no manifesto, Secret `revenda-db-credentials` por `envFrom`, mais `SANEAMENTO_LOTE`, `SANEAMENTO_TETO` e `LOG_LEVEL`; não depende do ConfigMap da base nem das variáveis de OIDC/webhook |
+| Rótulos | `app.kubernetes.io/name: revenda-saneamento`, `app.kubernetes.io/component: saneamento`, `app.kubernetes.io/part-of: revenda-veiculos`. O pod leva `app: revenda-saneamento`, valor aceito pela NetworkPolicy do `revenda-db` (`infra/terraform/network_policies.tf`), aplicada pelo Terraform antes do `kubectl apply` ([ADR-009](adrs/ADR-009-expiracao-preguicosa.md)) |
+| Concorrência com a API | segura: os mesmos UPDATEs condicionais ([ADR-008](adrs/ADR-008-concorrencia-update-condicional.md)); se a API expirar a venda primeiro, o lote do CronJob não a encontra mais |
+
+Validação local: `kubectl kustomize k8s/saneamento | kubeconform -strict -ignore-missing-schemas`. Para rodar o saneamento à mão (sem esperar os 10 min): `kubectl -n revenda create job revenda-saneamento-manual --from=cronjob/revenda-saneamento`.
+
 ## 3. Pipelines
 
 ### 3.1 Fluxo PR → CI → merge → CD → e2e
@@ -157,7 +178,7 @@ flowchart LR
     kc["kind create cluster (se faltar)<br/>kind export kubeconfig --internal"] --> idc{"realm revenda<br/>responde em :30180?"}
     idc -->|"não"| idf["Falha cedo: implantar<br/>a identidade antes"]
     idc -->|"sim"| tf["terraform apply<br/>(revenda-api.tfstate)<br/>API, Kong, Prometheus, Grafana"] --> build["docker build<br/>revenda-api:SHA"] --> load["kind load docker-image"]
-    load --> mig["Job revenda-migracao<br/>tolerante a rollback"] --> roll["kubectl kustomize + sed<br/>kubectl apply -f<br/>rollout status"] --> mon["Monitoramento<br/>alvos up, regras, painel"] --> e2e["pytest -m e2e (E2E_GATEWAY=1)<br/>Kong :30080 / Keycloak :30180"] --> sum["Resumo no<br/>job summary"]
+    load --> mig["Job revenda-migracao<br/>tolerante a rollback"] --> roll["kubectl kustomize + sed<br/>kubectl apply -f<br/>rollout status"] --> san["CronJob revenda-saneamento<br/>apply + execução de fumaça"] --> mon["Monitoramento<br/>alvos up, regras, painel"] --> e2e["pytest -m e2e (E2E_GATEWAY=1)<br/>Kong :30080 / Keycloak :30180"] --> sum["Resumo no<br/>job summary"]
   end
   cd --> kc
   e2e -->|"falhou"| rb["Rollback<br/>(seção 6)"]
@@ -171,11 +192,15 @@ Gatilhos: `pull_request` para `main` e `push` na `main`. Runner: `ubuntu-latest`
 |---|---|---|
 | `qualidade` | Checkout; Python 3.12; uv com cache; `uv sync --frozen`; `ruff check`; `ruff format --check`; `mypy src`; `lint-imports` (contratos de camadas e módulos) | Erro de lint, formatação, tipagem ou violação da regra de dependência |
 | `testes` | *Service container* `postgres:16.15-alpine` (banco `revenda_test`); `uv sync --frozen`; `uv run pytest -m "unit or integration" --cov=revenda --cov-branch --cov-report=term-missing --cov-report=xml --cov-fail-under=80` (os testes de integração aplicam `alembic upgrade head` do zero no início da sessão); publica o `coverage.xml` como artefato | Teste falho ou cobertura < 80% |
-| `imagem` | Build com Buildx (tag `revenda-api:${{ github.sha }}`, sem push, cache do GitHub Actions); Trivy na imagem (`severity: CRITICAL,HIGH`, `ignore-unfixed: true`, `exit-code: 1`); Trivy `fs` com scanner `secret` no repositório. A `trivy-action` é fixada por SHA de commit | Vulnerabilidade crítica/alta corrigível ou segredo detectado |
-| `infra` | `terraform fmt -check -recursive`; `terraform init -backend=false`; `terraform validate`; `kubectl kustomize` de `k8s/base` e `k8s/migracao` validado com `kubeconform -strict` (binário com checksum); configuração do Kong: `infra/kong/kong.yml.tftpl` renderizado com valores de teste (`sed`; falha se sobrar placeholder) e validado com `kong config parse` na imagem `kong:3.9.3`; monitoramento: `promtool check config`, `promtool check rules` e `promtool test rules infra/observabilidade/alertas.test.yml` na imagem `prom/prometheus:v3.14.0`, e o painel do Grafana validado com `jq` (uid `revenda-visao-geral`, todos os painéis com a fonte de dados `prometheus`); `infra/kind/cluster.yaml` validado com `yq` (YAML válido, os cinco `extraPortMappings` 30080, 30180, 30432, 30300 e 30900, imagem por digest); `hadolint` em `infra/runner/Dockerfile` e `shellcheck` em `infra/runner/entrypoint.sh`. O contrato do realm não é validado aqui: ele é testado no CI do repositório de identidade (job `realm`, contra um Keycloak real) | Formatação, configuração inválida (Terraform, Kong, Prometheus), teste de alerta falho, painel inválido ou manifesto fora do schema |
+| `imagem` | Build com Buildx (tag `revenda-api:${{ github.sha }}`, sem push, cache do GitHub Actions); Trivy na imagem em dois passos: `severity: CRITICAL`, `ignore-unfixed: true`, `exit-code: 1` (bloqueia) e `severity: HIGH`, `ignore-unfixed: true`, `exit-code: 0` (informativo, tabela publicada no *job summary*); Trivy `fs` com scanner `secret` no repositório | Vulnerabilidade **crítica** corrigível ou segredo detectado |
+| `infra` | `terraform fmt -check -recursive`; `terraform init -backend=false`; `terraform validate`; `kubectl kustomize` de `k8s/base`, `k8s/migracao` e `k8s/saneamento` validado com `kubeconform -strict` (binário com checksum); configuração do Kong: `infra/kong/kong.yml.tftpl` renderizado com valores de teste (`sed`; falha se sobrar placeholder) e validado com `kong config parse` na imagem `kong:3.9.3`; monitoramento: `promtool check config`, `promtool check rules` e `promtool test rules infra/observabilidade/alertas.test.yml` na imagem `prom/prometheus:v3.14.0`, e o painel do Grafana validado com `jq` (uid `revenda-visao-geral`, todos os painéis com a fonte de dados `prometheus`); `infra/kind/cluster.yaml` validado com `yq` (YAML válido, os cinco `extraPortMappings` 30080, 30180, 30432, 30300 e 30900, imagem por digest); `hadolint` em `infra/runner/Dockerfile` e `shellcheck` em `infra/runner/entrypoint.sh`. O contrato do realm não é validado aqui: ele é testado no CI do repositório de identidade (job `realm`, contra um Keycloak real) | Formatação, configuração inválida (Terraform, Kong, Prometheus), teste de alerta falho, painel inválido ou manifesto fora do schema |
 | `titulo-pr` | Só em `pull_request`: valida o título do PR contra a expressão regular de Conventional Commits | Título fora do padrão (não é *required check*) |
 
 Os quatro primeiros jobs rodam em paralelo e são os *required status checks* da `main`. O CI não tem acesso a segredos nem ao cluster.
+
+**Política do Trivy.** Só vulnerabilidade CRITICAL com correção disponível bloqueia o PR: com `CRITICAL,HIGH` bloqueando, um CVE HIGH novo na imagem base travava todos os PRs do dia, inclusive os que nada tinham a ver com ele, e a correção acabava sendo um *bump* apressado ou um `ignore` permanente. As HIGH corrigíveis continuam visíveis em todo CI (tabela no *job summary* do job `imagem`) e são tratadas no PR semanal do Dependabot ou num PR dedicado; `ignore-unfixed: true` nos dois passos porque sem correção disponível não há ação possível no PR.
+
+**Actions fixadas por SHA.** Todas as `uses:` de `ci.yml` e `cd.yml` apontam para o SHA completo do commit da release, com a versão em comentário (`uses: actions/checkout@3d3c42e5... # v7.0.1`), e não para tags móveis como `v7`: uma tag pode ser movida ou sequestrada (como ocorreu com a `trivy-action` em março/2026, GHSA-69fq-xp46-6x23), o SHA não. O Dependabot (`.github/dependabot.yml`, ecossistema `github-actions`) atualiza o SHA e o comentário de versão no mesmo PR.
 
 ### 3.3 `cd.yml`: entrega contínua
 
@@ -196,10 +221,11 @@ O CD da API não implanta nem altera o Keycloak: ele só confere que o realm est
 | 9. Migração | `kubectl delete job revenda-migracao --ignore-not-found --wait=true`; `kubectl kustomize k8s/migracao` + `sed` da imagem + `kubectl apply -f`; espera `complete` ou `failed` em paralelo (até 300 s) | Job com sucesso; em falha, imprime `describe` e logs e encerra **sem** alterar o Deployment |
 | 10. Deploy | `kubectl kustomize k8s/base` + `sed` da imagem + `kubectl apply -f`; anotação `kubernetes.io/change-cause`; `kubectl rollout status deployment/revenda-api --timeout=180s`; confere a imagem final do container `api` | Todas as réplicas novas *ready* com a imagem do SHA |
 | 11. Espera | `GET /health/ready` da API (até 180 s), pelo Kong em `revenda-control-plane:30080` | Resposta 2xx (API e gateway no ar) |
-| 12. Monitoramento | Consulta a API HTTP do Prometheus: `count(up{job="revenda-api"} == 1)` e `count(up{job="kong"} == 1)` maiores que zero (até 24 tentativas a cada 5 s); `/api/v1/rules` com pelo menos 3 grupos; `GET /api/health` do Grafana e o painel `revenda-visao-geral` pela API do Grafana | Coleta da API e do Kong ativa, alertas carregados, painel provisionado ([ADR-016](adrs/ADR-016-prometheus-grafana.md)) |
-| 13. e2e | Lê dos Secrets, via `kubectl`, o segredo do webhook (`revenda/revenda-webhook-secret`) e, do contrato com a identidade, a senha do gestor (`identidade/keycloak-gestor`) e o client técnico `revenda-e2e-admin` (`identidade/keycloak-e2e`: `E2E_ADMIN_CLIENT_ID` e `E2E_ADMIN_CLIENT_SECRET`), todos mascarados com `::add-mask::`; o admin do realm `master` não é usado; cria um venv com `tests/e2e/requirements.txt`; `pytest tests/e2e -m e2e` com `E2E_EXIGIR=1`, `E2E_GATEWAY=1` (os testes do gateway são obrigatórios) e relatório JUnit | Fluxo início-a-fim verde, pelo Kong ([09-testes.md](09-testes.md)) |
-| 14. Diagnóstico (em falha) | Pods de todos os namespaces, eventos, logs da API, logs do Kong (`kubectl -n gateway logs deployment/kong`) e pods do ns `observabilidade` (os logs do Keycloak são diagnosticados no repositório de identidade) | — |
-| 15. Resumo | `$GITHUB_STEP_SUMMARY`: SHA, imagem, réplicas prontas, resultado e contagem do e2e, URLs locais (API pelo gateway, Grafana, Prometheus, Keycloak) | — |
+| 12. Saneamento | `kubectl kustomize k8s/saneamento` + `sed` da imagem + `kubectl apply -f` (CronJob é declarativo: o `apply` atualiza no lugar, sem `delete`); confere a imagem do container `saneamento`; dispara uma execução de fumaça (`kubectl create job revenda-saneamento-cd-<sha> --from=cronjob/revenda-saneamento`) e espera `complete` (até 120 s) | CronJob com a imagem do SHA e uma execução concluída com a imagem nova (seção 2.5); depois do rollout, fora do caminho crítico |
+| 13. Monitoramento | Consulta a API HTTP do Prometheus: `count(up{job="revenda-api"} == 1)` e `count(up{job="kong"} == 1)` maiores que zero (até 24 tentativas a cada 5 s); `/api/v1/rules` com pelo menos 3 grupos; `GET /api/health` do Grafana e o painel `revenda-visao-geral` pela API do Grafana | Coleta da API e do Kong ativa, alertas carregados, painel provisionado ([ADR-016](adrs/ADR-016-prometheus-grafana.md)) |
+| 14. e2e | Lê dos Secrets, via `kubectl`, o segredo do webhook (`revenda/revenda-webhook-secret`) e, do contrato com a identidade, a senha do gestor (`identidade/keycloak-gestor`) e o client técnico `revenda-e2e-admin` (`identidade/keycloak-e2e`: `E2E_ADMIN_CLIENT_ID` e `E2E_ADMIN_CLIENT_SECRET`), todos mascarados com `::add-mask::`; o admin do realm `master` não é usado; cria um venv com `tests/e2e/requirements.txt`; `pytest tests/e2e -m e2e` com `E2E_EXIGIR=1`, `E2E_GATEWAY=1` (os testes do gateway são obrigatórios) e relatório JUnit | Fluxo início-a-fim verde, pelo Kong ([09-testes.md](09-testes.md)) |
+| 15. Diagnóstico (em falha) | Pods de todos os namespaces, eventos, logs da API, logs do Kong (`kubectl -n gateway logs deployment/kong`) e pods do ns `observabilidade` (os logs do Keycloak são diagnosticados no repositório de identidade) | — |
+| 16. Resumo | `$GITHUB_STEP_SUMMARY`: SHA, imagem, réplicas prontas, resultado e contagem do e2e, URLs locais (API pelo gateway, Grafana, Prometheus, Keycloak) | — |
 
 Se o e2e falhar após o rollout, o job falha (deploy marcado como vermelho) e o autor executa o rollback da seção 6. O rollback não é automático, para preservar o estado para diagnóstico.
 

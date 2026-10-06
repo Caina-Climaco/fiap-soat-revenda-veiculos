@@ -1,11 +1,11 @@
 # NetworkPolicies de entrada do banco e da API (docs/07-seguranca-lgpd.md, secao 3.3).
 # O CNI padrao do kind (kindnet) aplica NetworkPolicy desde o kind v0.24; ver
-# infra/README.md ("Verificar no PC") para o teste de bloqueio.
+# infra/README.md ("Checklist de verificacao manual") para o teste de bloqueio.
 #
 # Somente regras de ENTRADA (policy_types = ["Ingress"]): a saida dos pods (DNS, JWKS,
 # banco) nao e restringida.
 
-# revenda-db: aceita apenas a API e o Job de migracao (mesmo namespace).
+# revenda-db: aceita apenas a API, o Job de migracao e o CronJob de saneamento (mesmo namespace).
 resource "kubernetes_network_policy_v1" "revenda_db" {
   metadata {
     name      = "revenda-db-somente-api"
@@ -28,7 +28,7 @@ resource "kubernetes_network_policy_v1" "revenda_db" {
           match_expressions {
             key      = "app"
             operator = "In"
-            values   = ["revenda-api", "revenda-migracao"]
+            values   = ["revenda-api", "revenda-migracao", "revenda-saneamento"]
           }
         }
       }

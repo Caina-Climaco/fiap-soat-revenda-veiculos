@@ -169,7 +169,7 @@ Identificadores de domínio em português sem acento; termos técnicos podem fic
 
 | Termo | Definição | Onde aparece no código |
 |---|---|---|
-| Veículo | Unidade física à venda na revenda, identificada por marca, modelo, ano, cor e preço | `catalogo.domain.Veiculo`; tabela `catalogo.veiculos` |
+| Veículo | Unidade física à venda na revenda, descrita por marca, modelo, ano, cor e preço e identificada no sistema pelo `id` (UUID); não há placa, chassi nem RENAVAM no modelo (RN-20) | `catalogo.domain.Veiculo`; tabela `catalogo.veiculos` |
 | Anúncio / veículo à venda | Veículo com status `A_VENDA`, visível na listagem pública | `StatusVeiculo.A_VENDA`; `GET /api/v1/veiculos/a-venda`; caso de uso `ListarAVenda` |
 | Veículo vendido | Veículo cuja venda foi efetivada; estado final | `StatusVeiculo.VENDIDO`; `GET /api/v1/veiculos/vendidos`; caso de uso `ListarVendidos` |
 | Gestor da loja | Funcionário que mantém o estoque e acompanha as vendas | Papel de realm `gestor`; dependência `exigir_papel("gestor")` |
@@ -269,6 +269,8 @@ Legenda: **U** = upstream (fornece o modelo), **D** = downstream (consome o mode
 | `marcar_vendido()` | `status = RESERVADO` | `RESERVADO → VENDIDO` | `VeiculoVendido` |
 
 Na persistência, `reservar` é aplicado por UPDATE condicional (`... SET status = 'RESERVADO', versao = versao + 1 WHERE id = :id AND status = 'A_VENDA'`); zero linhas afetadas significa veículo indisponível.
+
+**Identidade e ciclo de vida do anúncio (decisões conscientes).** O agregado tem exatamente os cinco atributos de negócio do enunciado. Não há placa, chassi nem RENAVAM, e por isso dois veículos cadastrados com os mesmos marca, modelo, ano, cor e preço são **dois anúncios distintos**, de duas unidades físicas, identificados apenas pelo `id` (RN-20); o sistema não tem como detectar que o gestor cadastrou o mesmo carro duas vezes. Também não existe um estado "retirado do anúncio": um veículo `A_VENDA` permanece na vitrine até ser reservado e vendido, não há comando de retirada nem endpoint de exclusão ([06-dados.md](06-dados.md), seção sobre retenção) e o único ajuste possível é a edição dos cinco campos (RN-21). As duas regras são evoluções previstas: identificador civil quando houver integração com o DETRAN ou transferência de propriedade ([07-seguranca-lgpd.md](07-seguranca-lgpd.md), seção 5.7; [01-visao-geral.md](01-visao-geral.md), seção 1.3.2) e um estado `RETIRADO`, alcançável só a partir de `A_VENDA`, quando a loja precisar tirar um carro da vitrine sem vendê-lo.
 
 ### 2.5.2 Venda (contexto Vendas)
 
@@ -379,3 +381,5 @@ O enunciado informa que "nem todos os campos e funcionalidades estão descritos"
 | RN-17 | **Ordenação determinística**: listagens ordenadas por preço ascendente com desempate por `criado_em` ascendente e, por fim, `id` | Paginação estável; mesma consulta devolve a mesma ordem |
 | RN-18 | **Código de pagamento único e não previsível**: `PAG-` + 12 hexadecimais gerados aleatoriamente | Evita colisão e adivinhação de códigos |
 | RN-19 | **Resultado do gateway só com segredo válido**: webhook sem `X-Webhook-Secret` correto recebe 401 e não altera estado | Impede que qualquer pessoa efetive uma venda chamando o webhook |
+| RN-20 | **Identidade do veículo pelo `id`**: o veículo é identificado apenas pelo UUID gerado no cadastro; marca, modelo, ano, cor e preço são descrição, não identidade. Dois cadastros com os mesmos cinco valores são dois anúncios distintos (duas unidades físicas), ambos válidos; não há unicidade sobre esses campos nem campo de placa, chassi ou RENAVAM | O enunciado define o veículo só por esses cinco campos; impor unicidade sobre eles impediria anunciar dois carros iguais de verdade. O identificador civil é evolução, junto com a integração com o DETRAN ([07-seguranca-lgpd.md](07-seguranca-lgpd.md), seção 5.7) |
+| RN-21 | **Sem retirada do anúncio**: não existe estado "retirado" nem exclusão de veículo; um veículo `A_VENDA` só sai da vitrine ao ser reservado (e volta se a venda for cancelada) ou vendido. Um cadastro indevido é corrigido pela edição dos cinco campos (RN-02) | Decisão consciente: o enunciado não pede retirada, e ausência de exclusão preserva o histórico das vendas, que referenciam o veículo por `id` ([06-dados.md](06-dados.md)). A evolução prevista é um estado `RETIRADO`, alcançável só a partir de `A_VENDA` |
