@@ -79,7 +79,7 @@ Fronteiras de confiança: (1) internet/navegador → API Gateway (Kong) → API,
 | Credenciais | `revenda-db-credentials`, `revenda-webhook-secret`, `kong-config`, `grafana-admin` | `keycloak-db-credentials`, `keycloak-admin`, `keycloak-gestor`, `keycloak-e2e` |
 | Ligação entre os dois | Só o contrato público: JWT validado pelo JWKS, `sub` como pseudônimo; no ambiente local, o e2e lê os Secrets de contrato `keycloak-gestor` e `keycloak-e2e` | |
 
-Sobre o suporte a NetworkPolicy: o CNI padrão do kind (kindnet) passou a implementar NetworkPolicy a partir da versão 0.24. O projeto exige essa versão ou superior e valida o bloqueio no teste de fumaça; se o CNI não aplicar as políticas, elas permanecem como declaração de intenção versionada.
+Sobre o suporte a NetworkPolicy: o CNI padrão do kind (kindnet) passou a implementar NetworkPolicy a partir da versão 0.24. O projeto exige essa versão ou superior; o bloqueio é conferido manualmente pelo checklist de [infra/README.md](../infra/README.md#checklist-de-verificação-manual-no-pc) (um pod sem o rótulo esperado não alcança o banco nem a API). Se o CNI não aplicar as políticas, elas permanecem como declaração de intenção versionada.
 
 ### 3.4 Gestão de segredos
 

@@ -70,12 +70,23 @@ class CadastrarVeiculo:
 
 
 class EditarVeiculo:
-    def __init__(self, repo: VeiculoRepository, uow: UnidadeDeTrabalho, relogio: Clock) -> None:
+    def __init__(
+        self,
+        repo: VeiculoRepository,
+        uow: UnidadeDeTrabalho,
+        relogio: Clock,
+        expirador: ExpiradorReservas | None = None,
+    ) -> None:
         self._repo = repo
         self._uow = uow
         self._relogio = relogio
+        self._expirador = expirador
 
     def executar(self, veiculo_id: UUID, dados: DadosEdicao) -> Veiculo:
+        # Mesma expiração preguiçosa das leituras (ADR-009): um veículo cuja reserva já
+        # venceu volta a ser editável sem depender de alguém tê-lo consultado antes.
+        if self._expirador is not None:
+            self._expirador.expirar_vencidas(LIMITE_VARREDURA_EXPIRADAS)
         veiculo = self._repo.obter(veiculo_id)
         if veiculo is None:
             raise VeiculoNaoEncontradoError(veiculo_id)

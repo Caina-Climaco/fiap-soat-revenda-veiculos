@@ -33,7 +33,7 @@ flowchart TB
 | FastAPI `TestClient` (httpx) | Testes de API em processo |
 | httpx | Cliente HTTP dos testes e2e |
 | cryptography + PyJWT | Geração de par de chaves RSA de teste e emissão de tokens; JWKS falso injetado na dependência de autenticação |
-| PostgreSQL 16 (`postgres:16-alpine`) | Banco dos testes de integração (docker compose local; *service container* no CI) |
+| PostgreSQL 16 (`postgres:16.15-alpine`) | Banco dos testes de integração (docker compose local; *service container* no CI) |
 | Alembic | Aplica as migrações no banco de teste antes da suíte de integração |
 | ruff, mypy | Lint, formatação e tipos (não são testes, mas bloqueiam o CI) |
 | k6 | Teste de carga nas listagens (`tests/carga/listagens.js`) |
@@ -80,7 +80,7 @@ Observações:
 - O e2e obtém tokens pelo client `revenda-e2e` (password grant), habilitado somente no realm do ambiente local; cria seus próprios clientes de teste com nomes aleatórios para poder ser executado repetidas vezes, pela Admin API do realm `revenda`, com o client técnico `revenda-e2e-admin` (client credentials, só `manage-users`, `view-users` e `query-users`). O admin do realm `master` não é usado. Os dois clients e os Secrets `keycloak-gestor` e `keycloak-e2e` são parte do contrato publicado pelo [repositório de identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade).
 - Variáveis do e2e: `E2E_API_URL` e `E2E_KEYCLOAK_URL` (opcionais), `E2E_GESTOR_PASSWORD`, `E2E_WEBHOOK_SECRET` e `E2E_KC_CLIENT_SECRET` (obrigatórias), `E2E_KC_CLIENT_ID` (padrão `revenda-e2e-admin`), `E2E_GESTOR_USERNAME` (padrão `gestor.loja`), `E2E_RESERVA_TTL_MINUTOS` (padrão 30), `E2E_EXIGIR` (`1` transforma variável ausente em erro) e `E2E_GATEWAY` (`1` exige o API Gateway; sem ela, o gateway é detectado pelo cabeçalho `Via` e, sem Kong, os testes de `test_e2e_gateway.py` são pulados).
 - O docker compose cria o banco `revenda_test` na primeira subida do serviço `postgres`, com o usuário `revenda` e a senha `DB_PASSWORD` do `.env`. Sem `TEST_DATABASE_URL`, os testes de integração são pulados com aviso.
-- No CI, a etapa de integração usa o *service container* `postgres:16-alpine` (credenciais fixas de teste, sem segredo real); no CD, o e2e roda no runner self-hosted após o rollout, contra `http://revenda-control-plane:30080` (Kong) e `:30180`, com `E2E_GATEWAY=1`. O contrato do realm em si (papéis, clients, escopos, perfil de usuário) é testado no CI do repositório de identidade, job `realm`.
+- No CI, a etapa de integração usa o *service container* `postgres:16.15-alpine` (credenciais fixas de teste, sem segredo real); no CD, o e2e roda no runner self-hosted após o rollout, contra `http://revenda-control-plane:30080` (Kong) e `:30180`, com `E2E_GATEWAY=1`. O contrato do realm em si (papéis, clients, escopos, perfil de usuário) é testado no CI do repositório de identidade, job `realm`.
 
 ## 9.4 Critérios da suíte
 
@@ -325,7 +325,7 @@ São **23 testes** coletados em `tests/e2e` (contando os casos parametrizados):
 | `test_e2e_vendas_seguranca.py` | 8 | Compra anônima (BDD-04), gestor não compra (BDD-05), webhook com segredo ausente, vazio ou errado (BDD-07, 3 casos), webhook com código desconhecido (404), venda de outro cliente (404), minhas compras exige `cliente` |
 | `test_e2e_gateway.py` | 5 | API Gateway ([ADR-015](adrs/ADR-015-api-gateway-kong.md)): encaminhamento com cabeçalhos `RateLimit-*` e `Via`; `X-Request-ID` propagado ou gerado pelo Kong; rota `compra` com limite menor que a rota geral; `/metrics` → 404 do próprio Kong; webhook com a credencial do consumer `gateway-pagamento` chega à API (404 da API para código inexistente, com `X-Kong-Upstream-Latency`) |
 
-Com o gateway (CD, `E2E_GATEWAY=1`), o BDD-07 no e2e verifica que a recusa vem **do Kong**: status 401, cabeçalho `Server` do Kong e **sem** `X-Kong-Upstream-Latency`, ou seja, a requisição não chegou à API (`assert_barrado_no_gateway` em `tests/e2e/conftest.py`). A validação do segredo na própria API (defesa em profundidade) continua coberta pelo teste de integração. Sem gateway (docker compose), o mesmo teste espera o `problem+json` `webhook-nao-autorizado` da API e os 5 testes do gateway são pulados.
+Com o gateway (CD, `E2E_GATEWAY=1`), o BDD-07 no e2e verifica que a recusa vem **do Kong**: status 401, cabeçalho `Server` do Kong e **sem** `X-Kong-Upstream-Latency`, ou seja, a requisição não chegou à API (`api.barrado_no_gateway(resposta, status)` em `tests/e2e/conftest.py`). A validação do segredo na própria API (defesa em profundidade) continua coberta pelo teste de integração. Sem gateway (docker compose), o mesmo teste espera o `problem+json` `webhook-nao-autorizado` da API e os 5 testes do gateway são pulados.
 
 ### 9.5.11 Testes das regras de alerta
 

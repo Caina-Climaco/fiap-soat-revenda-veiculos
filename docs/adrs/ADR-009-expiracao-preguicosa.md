@@ -20,7 +20,8 @@ Quando a compra é iniciada, o veículo fica `RESERVADO`. Se o comprador nunca p
 - O TTL da reserva é configurável (`RESERVA_TTL_MINUTOS`, padrão 30).
 - A expiração é aplicada nas escritas:
   - em `IniciarCompra`, quando o veículo está reservado por venda vencida;
-  - em `ProcessarPagamento` e `CancelarVenda`, quando a venda envolvida está vencida.
+  - em `ProcessarPagamento` e `CancelarVenda`, quando a venda envolvida está vencida;
+  - no início de `EditarVeiculo`, para que um veículo cuja reserva venceu volte a ser editável sem depender de uma leitura anterior.
 - E também nas leituras, para que nenhuma resposta mostre uma reserva vencida como ativa:
   - no início de `ListarAVenda`, varrendo até 100 vendas vencidas por chamada;
   - em `ObterVeiculo`, quando o veículo está reservado por venda vencida;

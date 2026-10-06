@@ -6,8 +6,8 @@ Este documento descreve o modelo físico de dados da solução: as tabelas dos m
 
 | Instância | Namespace | Banco | Schemas | Dono lógico | Contém dados pessoais? |
 |---|---|---|---|---|---|
-| StatefulSet `revenda-db` (`postgres:16-alpine`) | `revenda` | `revenda` | `catalogo`, `vendas` (+ `public.alembic_version`) | `revenda-api` | **Não** (apenas o pseudônimo `comprador_id`) |
-| StatefulSet `keycloak-db` (`postgres:16-alpine`), do repositório de identidade | `identidade` | `keycloak` | `public` (schema gerenciado pelo Keycloak) | Keycloak | **Sim** (nome, e-mail, CPF, telefone, credenciais) |
+| StatefulSet `revenda-db` (`postgres:16.15-alpine`) | `revenda` | `revenda` | `catalogo`, `vendas` (+ `public.alembic_version`) | `revenda-api` | **Não** (apenas o pseudônimo `comprador_id`) |
+| StatefulSet `keycloak-db` (`postgres:16.15-alpine`), do repositório de identidade | `identidade` | `keycloak` | `public` (schema gerenciado pelo Keycloak) | Keycloak | **Sim** (nome, e-mail, CPF, telefone, credenciais) |
 
 Cada módulo é dono do seu schema: somente o código de `catalogo/infrastructure` mapeia tabelas de `catalogo`, e somente `vendas/infrastructure` mapeia tabelas de `vendas`. A única ligação entre os schemas é a **referência lógica** `vendas.vendas.veiculo_id → catalogo.veiculos.id`, **sem chave estrangeira** entre schemas: isso preserva a fronteira dos módulos e permite extrair Vendas para outro serviço no futuro. A integridade é garantida pela aplicação (a venda só é criada depois de `CatalogoPort.reservar` confirmar o veículo, na mesma transação; veículos não têm endpoint de exclusão) e pelo índice único parcial ([ADR-004](adrs/ADR-004-postgresql-schemas.md)).
 

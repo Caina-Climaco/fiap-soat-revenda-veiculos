@@ -76,7 +76,7 @@ O state contém os segredos em texto claro: fica fora do repositório (ADR-011).
 
 Segredos (Git Bash): `kubectl -n revenda get secret revenda-webhook-secret -o jsonpath='{.data.WEBHOOK_SECRET}' | base64 -d`; admin do Grafana: `kubectl -n observabilidade get secret grafana-admin -o jsonpath='{.data.GF_SECURITY_ADMIN_PASSWORD}' | base64 -d`. Veja também `terraform output comandos_segredos`. Os segredos do namespace `identidade` estão documentados no repositório de identidade.
 
-## Verificar no PC (não executável no ambiente de autoria)
+## Checklist de verificação manual (no PC)
 
 1. `terraform init` (sem o provider kind), `terraform validate` e `terraform fmt -check -recursive`; versionar o `.terraform.lock.hcl` gerado. Se um state antigo citar `kind_cluster`, apague o state (nenhum recurso foi criado).
 2. Com a identidade já implantada, `04-subir-ambiente.ps1`: `kind create cluster` com a imagem por digest (se faltar); `kubectl config current-context` = `kind-revenda`; o realm responde; um único `terraform apply` converge. Sem a identidade, o script falha com a mensagem pedindo para subi-la.

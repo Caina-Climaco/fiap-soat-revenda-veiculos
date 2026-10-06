@@ -3,7 +3,7 @@
 [![CI](https://github.com/Caina-Climaco/fiap-soat-revenda-veiculos/actions/workflows/ci.yml/badge.svg)](https://github.com/Caina-Climaco/fiap-soat-revenda-veiculos/actions/workflows/ci.yml)
 
 Trabalho Substitutivo do Tech Challenge — FIAP PósTech Software Architecture (SOAT), Fase 3.
-Autor: Cainã Clímaco (trabalho individual).
+Autor: Cainã Clímaco — RM366473 (trabalho individual).
 
 > **Esta entrega tem dois repositórios.** Este é o da **API** (Catálogo e Vendas). O serviço de **identidade** (Keycloak, cadastro e autorização de compradores), que o enunciado exige "totalmente apartado do resto da solução", está em **[fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade)**, com código, Terraform, state, CI, CD e runner próprios ([ADR-014](docs/adrs/ADR-014-identidade-em-repositorio-proprio.md)). Para subir o ambiente, comece por ele.
 
@@ -185,7 +185,7 @@ Tudo roda no PC do autor (Windows 11, Docker Desktop), sem nuvem:
 | CI ([`ci.yml`](.github/workflows/ci.yml)) | Runner hospedado (`ubuntu-latest`), em todo PR e push na `main` | `qualidade`: ruff (lint e formato), mypy, import-linter. `testes`: unit + integração contra PostgreSQL de serviço, cobertura mínima de 80%. `imagem`: build da imagem, Trivy (vulnerabilidades CRITICAL/HIGH corrigíveis) e varredura de segredos. `infra`: `terraform fmt`/`validate`, kubeconform nos manifestos, `kong config parse` da configuração do gateway, `promtool check`/`test rules` dos alertas e JSON do painel, validação do `cluster.yaml`, hadolint e shellcheck do runner (o contrato do realm é testado no CI do repositório de identidade). Um quinto job, `titulo-pr`, valida o título no padrão Conventional Commits (não é obrigatório na proteção) |
 | CD ([`cd.yml`](.github/workflows/cd.yml)) | Runner **self-hosted** num **container Linux** no Docker Desktop (labels `self-hosted`, `Linux`, `kind-local`), só em push na `main` (PR mergeado) ou disparo manual com `ref` ancestral da `main` (outra `ref` é recusada) | Cria o cluster kind se faltar; **confere que o realm `revenda` responde** (sem ele, falha cedo pedindo para implantar a identidade); `terraform apply` (state `revenda-api.tfstate`: API, Kong, Prometheus, Grafana); build `revenda-api:<sha>`; `kind load`; Job de migração; rollout do Deployment; aguarda a API pelo Kong; **confere o monitoramento** (alvos da API e do Kong `up` no Prometheus, regras carregadas, painel no Grafana); **testes e2e** pelo gateway; resumo no job summary |
 
-O serviço de identidade tem CI e CD próprios, no repositório dele; o CD da API não implanta nem altera o Keycloak, só consome o contrato (o realm publicado e os Secrets de contrato `keycloak-gestor` e `keycloak-e2e`). O runner roda em container porque o runner nativo para Windows também foi bloqueado pelo Smart App Control. O container fica na rede docker `kind` e compartilha o state do Terraform com os scripts do Windows por bind mount ([ADR-006](docs/adrs/ADR-006-ci-hospedado-cd-self-hosted.md), [docs/08](docs/08-ci-cd-infra.md)). O primeiro deploy automático passou com os 18 testes e2e verdes. Rollback: *Actions > CD > Run workflow* com `ref` = SHA anterior da `main`; o Job de migração da versão anterior reconhece o schema mais novo e não o altera ([docs/08, seção 6](docs/08-ci-cd-infra.md#6-rollback)).
+O serviço de identidade tem CI e CD próprios, no repositório dele; o CD da API não implanta nem altera o Keycloak, só consome o contrato (o realm publicado e os Secrets de contrato `keycloak-gestor` e `keycloak-e2e`). O runner roda em container porque o runner nativo para Windows também foi bloqueado pelo Smart App Control. O container fica na rede docker `kind` e compartilha o state do Terraform com os scripts do Windows por bind mount ([ADR-006](docs/adrs/ADR-006-ci-hospedado-cd-self-hosted.md), [docs/08](docs/08-ci-cd-infra.md)). Cada deploy termina com os 23 testes e2e verdes (18 do fluxo da API e 5 do gateway; [seção 4.3](#43-testes-ponta-a-ponta-e2e)). Rollback: *Actions > CD > Run workflow* com `ref` = SHA anterior da `main`; o Job de migração da versão anterior reconhece o schema mais novo e não o altera ([docs/08, seção 6](docs/08-ci-cd-infra.md#6-rollback)).
 
 ### 2.10 API Gateway (Kong)
 
@@ -587,7 +587,7 @@ Durante a carga, acompanhe o painel do Grafana em http://localhost:3000 (tráfeg
 | Pipeline | Testes e verificações |
 |---|---|
 | CI, job `qualidade` | `ruff check`, `ruff format --check`, `mypy src`, `lint-imports` |
-| CI, job `testes` | `pytest -m "unit or integration"` com cobertura de ramos e `--cov-fail-under=80`, contra o *service container* `postgres:16-alpine`; publica o `coverage.xml` como artefato |
+| CI, job `testes` | `pytest -m "unit or integration"` com cobertura de ramos e `--cov-fail-under=80`, contra o *service container* `postgres:16.15-alpine`; publica o `coverage.xml` como artefato |
 | CI, job `imagem` | Build da imagem; Trivy na imagem (CRITICAL/HIGH corrigíveis) e varredura de segredos no repositório |
 | CI, job `infra` | `terraform fmt -check`, `terraform validate`, kubeconform em `k8s/base` e `k8s/migracao`, `kong config parse` da configuração do Kong (renderizada com valores de teste), `promtool check config`/`check rules`/`test rules` e validação do JSON do painel com `jq`, validação do `infra/kind/cluster.yaml` (incluindo as portas 3000 e 9090), hadolint e shellcheck do runner (o realm é validado no CI do repositório de identidade, job `realm`) |
 | CD, job `deploy` | Antes de tudo, confere o discovery do realm `revenda` (pré-requisito); após o rollout, espera `/health/ready` pelo Kong; etapa **Monitoramento**: alvos `up` dos jobs `revenda-api` e `kong` no Prometheus, 3 grupos de regras carregados e painel `revenda-visao-geral` no Grafana; roda `pytest tests/e2e -m e2e` com `E2E_EXIGIR=1` e `E2E_GATEWAY=1`; o resultado e a contagem de testes vão para o job summary |
@@ -685,5 +685,5 @@ A porta 8080 não muda, mas agora é o Kong: `http://localhost:8080/metrics` pas
 
 ## 10. Autor
 
-**Cainã Clímaco** — FIAP PósTech Software Architecture (SOAT), Trabalho Substitutivo do Tech Challenge, Fase 3.
+**Cainã Clímaco** (RM366473) — FIAP PósTech Software Architecture (SOAT), Trabalho Substitutivo do Tech Challenge, Fase 3.
 Repositório: https://github.com/Caina-Climaco/fiap-soat-revenda-veiculos
