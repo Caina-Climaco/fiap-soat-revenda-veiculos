@@ -19,7 +19,7 @@ Os dados pessoais dos compradores precisam ficar apartados dos dados transaciona
 
 ## Decisão
 
-- **PostgreSQL 16** (imagem oficial `postgres:16-alpine`) em duas instâncias:
+- **PostgreSQL 16** (imagem oficial `postgres:16.15-alpine`) em duas instâncias:
   - `revenda-db` (namespace `revenda`), com os schemas `catalogo` e `vendas`;
   - `keycloak-db` (namespace `identidade`).
 - **Sem FK entre schemas:** `vendas.vendas.veiculo_id` é referência lógica. A integridade é garantida pela aplicação e pelo índice único parcial ([ADR-008](ADR-008-concorrencia-update-condicional.md)).

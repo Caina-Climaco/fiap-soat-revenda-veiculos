@@ -8,11 +8,10 @@ from __future__ import annotations
 
 import threading
 from collections.abc import Callable
-from datetime import timedelta
 
 from sqlalchemy import Engine, text
 
-from apoio.cenario import AS_10H
+from apoio.cenario import AS_10H, TTL
 from revenda.catalogo.domain.veiculo import Veiculo
 from revenda.catalogo.infrastructure.repositorio_sql import SqlVeiculoRepository
 from revenda.composicao import Composicao
@@ -23,8 +22,6 @@ from revenda.vendas.application.casos_uso import Solicitante
 from revenda.vendas.domain.erros import VeiculoIndisponivelError, VendaAtivaDuplicadaError
 from revenda.vendas.domain.venda import DescricaoVeiculo, Venda
 from revenda.vendas.infrastructure.repositorio_sql import SqlVendaRepository
-
-TTL = timedelta(minutes=30)
 
 
 def _cadastrar(banco: BancoDeDados) -> Veiculo:

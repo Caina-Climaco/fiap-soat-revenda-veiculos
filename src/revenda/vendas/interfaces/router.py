@@ -28,7 +28,6 @@ from revenda.vendas.domain.erros import (
     TransicaoVendaInvalidaError,
     VeiculoIndisponivelError,
     VeiculoNaoEncontradoError,
-    VendaAtivaDuplicadaError,
     VendaNaoEncontradaError,
 )
 from revenda.vendas.domain.venda import StatusVenda
@@ -50,7 +49,6 @@ PROBLEMAS_VENDAS: dict[type[Exception], TipoProblema] = {
         "veiculo-nao-encontrado", "Veículo não encontrado", 404
     ),
     VeiculoIndisponivelError: _INDISPONIVEL,
-    VendaAtivaDuplicadaError: _INDISPONIVEL,
     VendaNaoEncontradaError: TipoProblema("venda-nao-encontrada", "Venda não encontrada", 404),
     PagamentoNaoEncontradoError: TipoProblema(
         "pagamento-nao-encontrado", "Código de pagamento não encontrado", 404

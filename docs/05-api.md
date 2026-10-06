@@ -6,7 +6,7 @@ Este documento é o contrato HTTP da `revenda-api`: convenções gerais, autenti
 
 | Item | Convenção |
 |---|---|
-| Base URL (local) | `http://localhost:8080`. No ambiente kind é o **API Gateway (Kong)**, que encaminha só as rotas publicadas (ver 1.3); no docker compose de desenvolvimento é a própria API |
+| Base URL (local) | `http://localhost:8080`. No ambiente kind é o **API Gateway (Kong)**, que encaminha só as rotas publicadas (ver 1.2); no docker compose de desenvolvimento é a própria API |
 | Prefixo de versão | `/api/v1` para todos os recursos de negócio. Os endpoints de saúde (`/health/*`) ficam fora do prefixo |
 | Formato | `application/json; charset=utf-8` em requisições e respostas de sucesso; `application/problem+json` em erros |
 | Nomes de campos | `snake_case`, em português sem acento, alinhados à linguagem ubíqua (`preco_venda`, `codigo_pagamento`) |
@@ -33,7 +33,7 @@ As listagens aceitam `limite` (padrão 20, mínimo 1, máximo 100) e `deslocamen
 
 `total` é a quantidade de itens que satisfazem o filtro, independentemente da página.
 
-### 1.3 API Gateway (ambiente kind)
+### 1.2 API Gateway (ambiente kind)
 
 No ambiente kind, toda requisição passa pelo Kong antes de chegar à API ([ADR-015](adrs/ADR-015-api-gateway-kong.md)). O contrato dos endpoints não muda; o gateway acrescenta regras de borda:
 
@@ -52,7 +52,7 @@ No ambiente kind, toda requisição passa pelo Kong antes de chegar à API ([ADR
 - As respostas de erro geradas pelo Kong são JSON com o membro `message`, **não** `application/problem+json`; elas se distinguem por não trazerem o cabeçalho `X-Kong-Upstream-Latency` (presente quando a resposta veio da API). O cabeçalho `Via` identifica o gateway.
 - O JWT **não** é validado no Kong: os 401 `nao-autenticado` e 403 `acesso-negado` continuam vindo da API, em `problem+json`.
 
-### 1.2 Erros (RFC 9457, `application/problem+json`)
+### 1.3 Erros (RFC 9457, `application/problem+json`)
 
 Todos os erros seguem a RFC 9457 (Problem Details for HTTP APIs) com os membros `type`, `title`, `status`, `detail` e `instance`. O `type` é um URN estável por tipo de problema; a API acrescenta o membro de extensão `request_id` e, em erros de validação, `erros`.
 
@@ -93,7 +93,7 @@ Catálogo de tipos de problema:
 |---|---|---|
 | `requisicao-malformada` | 400 | JSON inválido ou corpo ilegível |
 | `nao-autenticado` | 401 | Token ausente, expirado, com assinatura inválida, `iss`/`aud`/`azp` incorretos |
-| `webhook-nao-autorizado` | 401 | `X-Webhook-Secret` ausente ou incorreto (no ambiente kind, só quando a credencial passa pelo Kong mas não confere na API; normalmente o 401 vem do próprio Kong, ver 1.3) |
+| `webhook-nao-autorizado` | 401 | `X-Webhook-Secret` ausente ou incorreto (no ambiente kind, só quando a credencial passa pelo Kong mas não confere na API; normalmente o 401 vem do próprio Kong, ver 1.2) |
 | `acesso-negado` | 403 | Token válido, mas sem o papel exigido |
 | `veiculo-nao-encontrado` | 404 | Veículo inexistente |
 | `venda-nao-encontrada` | 404 | Venda inexistente, ou existente mas pertencente a outro comprador |
@@ -221,7 +221,7 @@ Resumo:
 | POST | `/api/v1/vendas/{id}/cancelar` | dono (cliente) ou gestor | 200 |
 | POST | `/api/v1/pagamentos/webhook` | gateway de pagamento (`X-Webhook-Secret`, conferido no Kong e na API) | 200 |
 
-No ambiente kind, qualquer rota de `/api/v1` pode responder **429** do Kong quando o limite por IP é excedido (ver 1.3).
+No ambiente kind, qualquer rota de `/api/v1` pode responder **429** do Kong quando o limite por IP é excedido (ver 1.2).
 
 ### 4.1 `GET /health/live`
 
@@ -297,7 +297,7 @@ Content-Type: application/json
 
 ### 4.4 `PATCH /api/v1/veiculos/{id}` — editar veículo
 
-Papel: **gestor**. Atualização parcial de `marca`, `modelo`, `ano`, `cor` e/ou `preco` (ao menos um campo). Só é permitida com o veículo em `A_VENDA`. `status`, `versao` e datas não são editáveis (campos desconhecidos ou somente leitura resultam em 422). Corpo `application/json` com semântica de *merge* (campos ausentes não mudam). Evento: `VeiculoEditado`.
+Papel: **gestor**. Atualização parcial de `marca`, `modelo`, `ano`, `cor` e/ou `preco` (ao menos um campo). Só é permitida com o veículo em `A_VENDA`; a expiração preguiçosa é aplicada antes da leitura, então um veículo `RESERVADO` por venda já vencida volta a `A_VENDA` e aceita a edição ([ADR-009](adrs/ADR-009-expiracao-preguicosa.md)). `status`, `versao` e datas não são editáveis (campos desconhecidos ou somente leitura resultam em 422). Corpo `application/json` com semântica de *merge* (campos ausentes não mudam). Evento: `VeiculoEditado`.
 
 **Idempotência.** Um `PATCH` que não muda nenhum valor (por exemplo, o mesmo preço já gravado) responde `200` com o veículo como está: `versao` e `atualizado_em` não mudam e nenhum evento é registrado. Repetir a mesma edição, portanto, não gera versões novas.
 
@@ -565,7 +565,7 @@ Authorization: Bearer eyJ...   (gestor)
 
 ### 4.12 `POST /api/v1/vendas/{id}/cancelar` — cancelar venda
 
-Papel: **dono** ou **gestor**. Cancela uma venda `AGUARDANDO_PAGAMENTO` e libera o veículo (`RESERVADO` → `A_VENDA`). O motivo é derivado de quem cancela: `DESISTENCIA_COMPRADOR` (dono) ou `CANCELADA_PELA_LOJA` (gestor). Sem corpo. Eventos: `CompraCanceladaPeloComprador` ou `VendaCancelada`, e `VeiculoLiberado`.
+Papel: **dono** ou **gestor**. Cancela uma venda `AGUARDANDO_PAGAMENTO` e libera o veículo (`RESERVADO` → `A_VENDA`). O motivo é derivado de quem cancela: `DESISTENCIA_COMPRADOR` (dono) ou `CANCELADA_PELA_LOJA` (gestor). Sem corpo. Eventos: `VendaCancelada` (sempre), mais `CompraCanceladaPeloComprador` quando quem cancela é o dono, e `VeiculoLiberado`.
 
 ```http
 POST /api/v1/vendas/c3a7d1e2-58b4-4f6a-a1d9-0e2f4b6c8a10/cancelar HTTP/1.1

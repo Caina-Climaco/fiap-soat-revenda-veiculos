@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import re
 import uuid
+from datetime import timedelta
 from typing import Any
 
 import pytest
 
 from apoio.api import Api, tipo_problema
+from revenda.shared.clock import RelogioFixo
 
 DATA_UTC = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 
@@ -139,6 +141,25 @@ def test_bdd_06_edicao_de_veiculo_reservado(api: Api) -> None:
     assert api.veiculo(veiculo["id"])["preco"] == "95000.00"
     assert api.vendas_do_gestor()["itens"][0]["preco_venda"] == "95000.00"
     assert venda["preco_venda"] == "95000.00"
+
+
+def test_edicao_apos_reserva_vencida_aplica_a_expiracao(api: Api, relogio: RelogioFixo) -> None:
+    """ADR-009: o PATCH expira a reserva vencida sozinho, sem depender de uma leitura antes."""
+    veiculo = api.cadastrar(marca="Toyota", modelo="Corolla", ano=2019, preco="95000.00")
+    venda = api.compra_ok(veiculo["id"], api.novo_cliente())
+    relogio.avancar(timedelta(minutes=31))  # venceu; ninguém consultou o veículo desde então
+
+    resposta = api.http.patch(
+        f"/api/v1/veiculos/{veiculo['id']}", json={"preco": "90000.00"}, headers=api.gestor
+    )
+    assert resposta.status_code == 200, resposta.text
+    assert (resposta.json()["status"], resposta.json()["preco"]) == ("A_VENDA", "90000.00")
+    vista = api.vendas_do_gestor()["itens"][0]
+    assert (vista["id"], vista["status"], vista["motivo_cancelamento"]) == (
+        venda["id"],
+        "CANCELADA",
+        "RESERVA_EXPIRADA",
+    )
 
 
 def test_bdd_06_edicao_de_veiculo_a_venda(api: Api) -> None:

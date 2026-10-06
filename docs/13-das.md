@@ -10,7 +10,7 @@ Folha de aprovação do desenho da solução: resume o que será entregue, as de
 | Contexto | Trabalho Substitutivo do Tech Challenge, FIAP PósTech Software Architecture (SOAT), Fase 3 |
 | Versão do desenho | 1.1 (API Gateway e monitoramento, 05/10/2026) |
 | Autor (proponente) | Cainã Clímaco |
-| Data | 03/10/2026 |
+| Data | 05/10/2026 (versão 1.0 em 03/10/2026) |
 | Entrega prevista | 15/10/2026 |
 
 ## 13.2 Resumo da solução e escopo
@@ -102,8 +102,8 @@ Lista completa em [10-plano-execucao.md, seção 10.5](10-plano-execucao.md#105-
 
 | Papel | Nome | Data | Parecer |
 |---|---|---|---|
-| Proponente (autor) | Cainã Clímaco | 03/10/2026 | Submetido para aprovação |
-| Arquiteto revisor | | | |
-| Segurança e privacidade (LGPD) | | | |
-| Operações / plataforma | | | |
-| Avaliador (FIAP) | | | |
+| Proponente (autor) | Cainã Clímaco | 05/10/2026 | Submetido para aprovação (versão 1.1) |
+| Arquiteto revisor | — | — | Não se aplica: trabalho individual; os papéis de revisão foram exercidos pelo próprio autor com apoio das verificações automáticas do CI |
+| Segurança e privacidade (LGPD) | — | — | Não se aplica (idem); análise em [07-seguranca-lgpd.md](07-seguranca-lgpd.md) |
+| Operações / plataforma | — | — | Não se aplica (idem); o CD verde na `main` é a evidência operacional |
+| Avaliador (FIAP) | | | Reservado para o parecer da avaliação |

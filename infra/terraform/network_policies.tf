@@ -1,4 +1,4 @@
-# NetworkPolicies de entrada dos bancos (docs/07-seguranca-lgpd.md, secao 3.3).
+# NetworkPolicies de entrada do banco e da API (docs/07-seguranca-lgpd.md, secao 3.3).
 # O CNI padrao do kind (kindnet) aplica NetworkPolicy desde o kind v0.24; ver
 # infra/README.md ("Verificar no PC") para o teste de bloqueio.
 #

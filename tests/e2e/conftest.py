@@ -73,10 +73,6 @@ def _mensagem_ausentes(ausentes: list[str]) -> str:
     )
 
 
-def pytest_configure(config: pytest.Config) -> None:
-    config.addinivalue_line("markers", "e2e: testes ponta a ponta contra o ambiente implantado")
-
-
 def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item]) -> None:
     ausentes = _variaveis_ausentes()
     if not ausentes:
@@ -178,9 +174,7 @@ class Token:
 class Usuario:
     username: str
     password: str
-    papel: str
     keycloak_id: str | None = None
-    email: str | None = None
     _token: Token | None = field(default=None, repr=False)
 
 
@@ -266,9 +260,7 @@ class Keycloak:
         )
         keycloak_id = resposta.headers.get("location", "").rstrip("/").rsplit("/", 1)[-1]
         self.criados.append(keycloak_id)
-        return Usuario(
-            username=username, password=senha, papel="cliente", keycloak_id=keycloak_id, email=email
-        )
+        return Usuario(username=username, password=senha, keycloak_id=keycloak_id)
 
     def remover_criados(self) -> list[str]:
         """Remove os usuarios criados nesta execucao; devolve os que falharam."""
@@ -483,9 +475,7 @@ def via_gateway(e2e_config: Config, http: httpx.Client) -> bool:
 
 @pytest.fixture(scope="session")
 def gestor(e2e_config: Config) -> Usuario:
-    return Usuario(
-        username=e2e_config.gestor_username, password=e2e_config.gestor_password, papel="gestor"
-    )
+    return Usuario(username=e2e_config.gestor_username, password=e2e_config.gestor_password)
 
 
 @pytest.fixture(scope="session")

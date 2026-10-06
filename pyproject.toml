@@ -91,6 +91,7 @@ source = ["revenda"]
 branch = true
 
 [tool.coverage.report]
+fail_under = 80  # mesmo limiar do --cov-fail-under do CI (docs/09, secao 9.4)
 show_missing = true
 skip_covered = false
 exclude_also = [

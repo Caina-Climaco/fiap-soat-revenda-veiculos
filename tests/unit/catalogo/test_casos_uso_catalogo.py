@@ -172,6 +172,18 @@ def test_editar_sem_mudanca_real_nao_grava_nem_publica(
     assert repo.dados[veiculo.id].versao == 1
 
 
+def test_editar_aciona_a_expiracao_antes_de_ler(
+    repo: VeiculoRepoMemoria, uow: UowFalsa, relogio: RelogioFixo
+) -> None:
+    veiculo = cadastrar(repo, uow, relogio, "1.00")
+    expirador = ExpiradorEspiao()
+    editado = EditarVeiculo(repo, uow, relogio, expirador).executar(
+        veiculo.id, DadosEdicao(cor="Azul")
+    )
+    assert editado.cor == "Azul"
+    assert expirador.chamadas == [100]
+
+
 def test_obter_aciona_a_expiracao_antes_de_ler(
     repo: VeiculoRepoMemoria, uow: UowFalsa, relogio: RelogioFixo
 ) -> None:

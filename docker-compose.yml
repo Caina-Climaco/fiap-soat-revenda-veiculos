@@ -46,7 +46,7 @@ services:
   migracao:
     build: .
     image: revenda-api:dev
-    command: ["alembic", "upgrade", "head"]
+    command: ["python", "-m", "revenda.migracao"]
     environment: &ambiente-db
       DB_HOST: revenda-db
       DB_PORT: "5432"

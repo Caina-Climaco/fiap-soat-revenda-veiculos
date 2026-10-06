@@ -12,10 +12,8 @@ from revenda.catalogo.domain.erros import ConflitoConcorrenciaError, VeiculoNaoE
 from revenda.catalogo.domain.repositorio import VeiculoRepository
 from revenda.catalogo.domain.veiculo import StatusVeiculo, Veiculo
 from revenda.shared.clock import Clock
-from revenda.shared.paginacao import Pagina
+from revenda.shared.paginacao import LIMITE_VARREDURA_EXPIRADAS, Pagina
 from revenda.shared.uow import UnidadeDeTrabalho
-
-LIMITE_VARREDURA_EXPIRADAS = 100
 
 
 class ExpiradorReservas(Protocol):
@@ -70,12 +68,23 @@ class CadastrarVeiculo:
 
 
 class EditarVeiculo:
-    def __init__(self, repo: VeiculoRepository, uow: UnidadeDeTrabalho, relogio: Clock) -> None:
+    def __init__(
+        self,
+        repo: VeiculoRepository,
+        uow: UnidadeDeTrabalho,
+        relogio: Clock,
+        expirador: ExpiradorReservas | None = None,
+    ) -> None:
         self._repo = repo
         self._uow = uow
         self._relogio = relogio
+        self._expirador = expirador
 
     def executar(self, veiculo_id: UUID, dados: DadosEdicao) -> Veiculo:
+        # Mesma expiração preguiçosa das leituras (ADR-009): um veículo cuja reserva já
+        # venceu volta a ser editável sem depender de alguém tê-lo consultado antes.
+        if self._expirador is not None:
+            self._expirador.expirar_vencidas(LIMITE_VARREDURA_EXPIRADAS)
         veiculo = self._repo.obter(veiculo_id)
         if veiculo is None:
             raise VeiculoNaoEncontradoError(veiculo_id)

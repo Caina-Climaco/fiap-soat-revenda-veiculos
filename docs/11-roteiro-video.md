@@ -2,6 +2,8 @@
 
 Este documento é o roteiro do vídeo exigido pelo enunciado: mostrar a solução funcionando **na infraestrutura e no uso**, com um teste início-a-fim que passa por **cadastro de cliente, cadastro de veículo, compra e efetivação da compra**. Duração alvo: cerca de 12 minutos. Para cada bloco há o tempo, o que mostrar na tela e uma fala sugerida, em primeira pessoa, para adaptar livremente. Antes de gravar, siga o [checklist de preparação](#112-checklist-de-preparação).
 
+> **Vídeo entregue.** O vídeo final (12:58, legendado) condensa este roteiro em cinco blocos, na ordem que o enunciado pede: infraestrutura (blocos 3 e 4 daqui), deploy automatizado (bloco 5), uso ponta a ponta (bloco 6), separação dos dados (bloco 7) e monitoramento ([12-observabilidade.md](12-observabilidade.md)). README, modelagem, ADRs, LGPD, lista de PRs e cobertura ficaram de fora de propósito: são verificados pelos links do PDF de entrega, não pelo vídeo.
+
 Os comandos e endereços aqui são os mesmos do [README](../README.md#3-como-usar-localmente); a sequência de uso segue o fluxo de [02-modelagem-ddd.md](02-modelagem-ddd.md) (Domain Storytelling, seção 2.1) e o cenário BDD-01 de [09-testes.md](09-testes.md).
 
 ## 11.1 Blocos e tempos
@@ -132,14 +134,14 @@ O mesmo, em Git Bash: `kubectl -n identidade get secret keycloak-gestor -o jsonp
 
 **Fala sugerida**:
 > Comecei pela modelagem. No Event Storming aparecem os eventos do processo: veículo cadastrado, compra iniciada, veículo reservado, pagamento aprovado ou recusado, venda efetivada e reserva expirada. Daí saíram quatro contextos: Vendas, que é o subdomínio principal; Catálogo, de suporte; Identidade, genérico, resolvido com o Keycloak; e o gateway de pagamento, externo. Vendas conversa com Catálogo por uma porta, e o webhook do gateway funciona como camada anticorrupção.
-> O enunciado avisa que nem tudo está descrito, então a modelagem descobriu regras: a compra reserva o veículo por 30 minutos, o preço fica congelado, veículo reservado não pode ser editado, um veículo só pode ter uma venda ativa e o gestor não compra. As decisões estão registradas em onze ADRs, como Keycloak, monólito modular, concorrência por UPDATE condicional e expiração preguiçosa.
+> O enunciado avisa que nem tudo está descrito, então a modelagem descobriu regras: a compra reserva o veículo por 30 minutos, o preço fica congelado, veículo reservado não pode ser editado, um veículo só pode ter uma venda ativa e o gestor não compra. As decisões estão registradas em dezesseis ADRs, como Keycloak, monólito modular, concorrência por UPDATE condicional, expiração preguiçosa, identidade em repositório próprio, API Gateway com Kong e monitoramento com Prometheus e Grafana.
 
 ### Bloco 3 — Arquitetura e separação de dados (2:00 a 3:00)
 
 **Tela**: `docs/04-arquitetura.md`, diagrama C4 de containers (seção 3) e, rapidamente, o diagrama de implantação (seção 5). Depois `docs/07-seguranca-lgpd.md`, seção 5.2 (tabela de princípios).
 
 **Fala sugerida**:
-> A solução tem dois sistemas. A revenda-api é um monólito modular em Python com FastAPI, com os módulos Catálogo e Vendas em Clean Architecture, e um PostgreSQL com um schema por módulo. O Keycloak fica em outro namespace, com outro PostgreSQL. Essa é a separação que o enunciado pede: nome, e-mail, CPF e telefone existem só no banco do Keycloak. A API valida o token e guarda na venda apenas o identificador opaco do usuário. Isso aplica o princípio da necessidade da LGPD, artigo 6º, inciso III: o banco transacional não tem dados pessoais diretos, e a ligação com a pessoa só existe no serviço de identidade, mantido separadamente.
+> A solução tem dois sistemas. A revenda-api é um monólito modular em Python com FastAPI, com os módulos Catálogo e Vendas em Clean Architecture, e um PostgreSQL com um schema por módulo. O Keycloak fica em outro repositório, com pipeline, Terraform e state próprios, em outro namespace e com outro PostgreSQL. Essa é a separação que o enunciado pede: nome, e-mail, CPF e telefone existem só no banco do Keycloak. A API valida o token e guarda na venda apenas o identificador opaco do usuário. Isso aplica o princípio da necessidade da LGPD, artigo 6º, inciso III: o banco transacional não tem dados pessoais diretos, e a ligação com a pessoa só existe no serviço de identidade, mantido separadamente.
 
 ### Bloco 4 — Infraestrutura (3:00 a 4:15)
 
@@ -163,8 +165,8 @@ terraform -chdir=infra/terraform output urls
 Por fim, no GitHub: *Settings > Actions > Runners*, mostrando o runner online com as labels `self-hosted`, `Linux` e `kind-local`.
 
 **Fala sugerida**:
-> Tudo roda no meu PC, sem nuvem. O cluster é um kind de um nó, criado pela CLI do kind a partir deste arquivo. No começo eu usava o provider do kind no Terraform, mas o binário dele não é assinado e o Smart App Control do Windows 11 bloqueou. Então a CLI cria o cluster, e o Terraform cuida de tudo o que fica dentro dele: os namespaces revenda e identidade, os dois PostgreSQL, o Keycloak com o realm, as NetworkPolicies, o metrics-server e as senhas, que são geradas aleatoriamente e viram Secrets. Nada sensível está no repositório; o state fica no meu perfil de usuário.
-> Aqui estão os pods: a API com duas réplicas e HPA, os dois bancos e o Keycloak. E este é o runner self-hosted do GitHub Actions: ele roda num container Linux no Docker Desktop, ligado à rede do kind, e é ele que faz o deploy.
+> Tudo roda no meu PC, sem nuvem. O cluster é um kind de um nó, criado pela CLI do kind a partir deste arquivo. No começo eu usava o provider do kind no Terraform, mas o binário dele não é assinado e o Smart App Control do Windows 11 bloqueou. Então a CLI cria o cluster, e cada repositório tem o seu Terraform para o que fica dentro dele. O da API cuida dos namespaces revenda, gateway e observabilidade: o PostgreSQL da API, o Kong, o Prometheus e o Grafana, as NetworkPolicies, o metrics-server e as senhas, que são geradas aleatoriamente e viram Secrets. O do serviço de identidade cuida do namespace identidade, com o Keycloak, o realm e o PostgreSQL dele. Nada sensível está nos repositórios; os dois states ficam no meu perfil de usuário.
+> Aqui estão os pods: a API com duas réplicas e HPA, o Kong, o Prometheus e o Grafana, os dois bancos e o Keycloak. E estes são os runners self-hosted do GitHub Actions, um por repositório: rodam em containers Linux no Docker Desktop, ligados à rede do kind, e são eles que fazem o deploy.
 
 ### Bloco 5 — Pipeline (4:15 a 6:15)
 

@@ -5,6 +5,7 @@ from __future__ import annotations
 import io
 import json
 import logging
+import sys
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -115,14 +116,12 @@ def test_formatador_json_registra_excecao() -> None:
     try:
         raise RuntimeError("falhou")
     except RuntimeError:
-        import sys
-
         registro = logging.LogRecord("x", logging.ERROR, __file__, 1, "erro", (), sys.exc_info())
     saida = json.loads(FormatadorJson().format(registro))
     assert "RuntimeError: falhou" in saida["excecao"]
 
 
-def test_configurar_logs_e_publicador_de_eventos(capsys: pytest.CaptureFixture[str]) -> None:
+def test_configurar_logs_e_publicador_de_eventos() -> None:
     configurar_logs("INFO")
     raiz = logging.getLogger()
     buffer = io.StringIO()

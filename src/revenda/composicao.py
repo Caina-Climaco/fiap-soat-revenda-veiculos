@@ -83,7 +83,7 @@ class Composicao:
         expirador = self._expirador(sessao, uow, repo)
         return CasosUsoCatalogo(
             cadastrar=CadastrarVeiculo(repo, uow, self._relogio),
-            editar=EditarVeiculo(repo, uow, self._relogio),
+            editar=EditarVeiculo(repo, uow, self._relogio, expirador),
             obter=ObterVeiculo(repo, expirador),
             listar_a_venda=ListarAVenda(repo, expirador),
             listar_vendidos=ListarVendidos(repo),

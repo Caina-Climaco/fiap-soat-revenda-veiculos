@@ -209,7 +209,7 @@ flowchart LR
         dep["Deployment revenda-api<br/>2..5 pods (HPA, CPU 60%)<br/>anotações prometheus.io/scrape"]
         svcapi["Service revenda-api<br/>ClusterIP 80"]
         job["Job revenda-migracao<br/>python -m revenda.migracao"]
-        stsapi[("StatefulSet revenda-db<br/>postgres:16-alpine + PVC")]
+        stsapi[("StatefulSet revenda-db<br/>postgres:16.15-alpine + PVC")]
         svcdb["Service revenda-db<br/>5432, NodePort 30432"]
       end
       subgraph NSG["namespace gateway"]
@@ -225,7 +225,7 @@ flowchart LR
       subgraph NSI["namespace identidade (repositório de identidade)"]
         kcdep["Deployment keycloak<br/>1 pod, start-dev"]
         svckc["Service keycloak<br/>NodePort 30180"]
-        stskc[("StatefulSet keycloak-db<br/>postgres:16-alpine + PVC")]
+        stskc[("StatefulSet keycloak-db<br/>postgres:16.15-alpine + PVC")]
         svckcdb["Service keycloak-db<br/>ClusterIP 5432"]
       end
       subgraph NSK["namespace kube-system"]
@@ -477,8 +477,15 @@ fiap-soat-revenda-veiculos/
 │   │   ├── db.py            # engine, sessionmaker, UnitOfWork
 │   │   ├── auth.py          # validação JWT/JWKS, Principal, exigir_papel
 │   │   ├── errors.py        # exceções base e handlers problem+json
-│   │   ├── clock.py         # Clock (UTC) e FixedClock para testes
-│   │   └── logging.py       # log estruturado JSON e registro de eventos de domínio
+│   │   ├── clock.py         # Clock (UTC) e RelogioFixo para testes
+│   │   ├── logging.py       # log estruturado JSON
+│   │   ├── eventos.py       # eventos de domínio publicados em processo (log + métricas)
+│   │   ├── uow.py           # abstração da Unit of Work usada pelos casos de uso
+│   │   ├── metricas.py      # métricas Prometheus: HTTP (middleware) e de negócio (eventos)
+│   │   ├── middleware.py    # correlação X-Request-ID e log de acesso
+│   │   ├── saude.py         # /health/live e /health/ready (probes)
+│   │   ├── http.py          # convenções HTTP: datas, dinheiro, paginação
+│   │   └── paginacao.py     # Pagina devolvida pelas listagens
 │   ├── catalogo/
 │   │   ├── domain/          # Veiculo, StatusVeiculo, erros, VeiculoRepository (porta)
 │   │   ├── application/     # casos de uso, DTOs, CatalogoAdapter (implementa CatalogoPort)
@@ -489,10 +496,17 @@ fiap-soat-revenda-veiculos/
 │   │   ├── application/     # casos de uso, CatalogoPort (porta), gerador de código
 │   │   ├── infrastructure/  # modelos ORM (schema vendas), SqlVendaRepository
 │   │   └── interfaces/      # routers /vendas e /pagamentos/webhook (ACL)
-│   └── main.py              # app factory: monta routers, handlers, composição de dependências
+│   ├── composicao.py        # único lugar que conhece Catálogo e Vendas: liga repositórios, UoW, CatalogoAdapter e casos de uso
+│   ├── migracao.py          # migração tolerante a rollback (python -m revenda.migracao, Job do Kubernetes)
+│   └── main.py              # app factory: monta routers, handlers, middleware e /metrics
 ├── migrations/              # Alembic (env.py, versions/)
-├── tests/{unit,integration,e2e}
-├── infra/terraform/         # só o namespace revenda (o realm e o Keycloak estão no repositório de identidade)
+├── tests/{unit,integration,e2e,carga}
+├── infra/
+│   ├── kind/cluster.yaml    # cluster kind (idêntico ao do repositório de identidade)
+│   ├── terraform/           # namespaces revenda, gateway e observabilidade (o Keycloak está no repositório de identidade)
+│   ├── kong/                # kong.yml.tftpl (configuração declarativa do gateway)
+│   ├── observabilidade/     # prometheus.yml, alertas.yml (+ testes), provisionamento e painel do Grafana
+│   └── runner/              # imagem do runner self-hosted do CD
 └── k8s/{base,migracao}/
 ```
 
@@ -508,7 +522,7 @@ fiap-soat-revenda-veiculos/
 ### 7.3 Regra de dependência
 
 - As dependências de código apontam para dentro: `interfaces` → `application` → `domain`; `infrastructure` implementa interfaces declaradas em `domain`/`application` (inversão de dependência).
-- **Entre módulos**, apenas Vendas conhece Catálogo, e somente pela porta `CatalogoPort`, declarada em `vendas/application`. A implementação (`CatalogoAdapter`) mora em `catalogo/application` e é ligada em `main.py`. Vendas nunca importa `catalogo.domain` nem `catalogo.infrastructure`; Catálogo nunca importa Vendas.
+- **Entre módulos**, apenas Vendas conhece Catálogo, e somente pela porta `CatalogoPort`, declarada em `vendas/application`. A implementação (`CatalogoAdapter`) mora em `catalogo/application` e é ligada em `composicao.py` (`main.py` só instancia a composição). Vendas nunca importa `catalogo.domain` nem `catalogo.infrastructure`; Catálogo nunca importa Vendas.
 - A regra é verificada automaticamente com `import-linter` (contratos de camadas e de independência entre módulos) executado no CI junto com o ruff.
 
 ### 7.4 Vendas e Catálogo na mesma transação (Unit of Work)

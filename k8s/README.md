@@ -3,7 +3,7 @@
 ```text
 k8s/
 ├── base/        # ConfigMap revenda-api-config, Deployment revenda-api, Service ClusterIP 80, HPA 2..5
-└── migracao/    # Job revenda-migracao (alembic upgrade head)
+└── migracao/    # Job revenda-migracao (python -m revenda.migracao)
 ```
 
 Tudo no namespace `revenda`. A plataforma da API (namespace, Secrets, `revenda-db`, metrics-server, NetworkPolicies, o API Gateway Kong e Prometheus/Grafana) vem do Terraform em `infra/terraform`; estes manifestos só **referenciam** os Secrets `revenda-db-credentials` (`DB_USER`, `DB_PASSWORD`, `DB_NAME`) e `revenda-webhook-secret` (`WEBHOOK_SECRET`).
@@ -28,6 +28,6 @@ O Job de migração é autossuficiente (define `DB_HOST`/`DB_PORT` no próprio J
 ## Validação local
 
 ```bash
-kubectl kustomize k8s/base | kubeconform -strict -summary -kubernetes-version 1.34.0
-kubectl kustomize k8s/migracao | kubeconform -strict -summary -kubernetes-version 1.34.0
+kubectl kustomize k8s/base | kubeconform -strict -ignore-missing-schemas -summary -output text
+kubectl kustomize k8s/migracao | kubeconform -strict -ignore-missing-schemas -summary -output text
 ```

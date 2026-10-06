@@ -12,7 +12,7 @@ from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
-from apoio.cenario import AS_10H
+from apoio.cenario import AS_10H, TTL
 from revenda.catalogo.domain.veiculo import StatusVeiculo, Transicao, Veiculo
 from revenda.catalogo.infrastructure.repositorio_sql import SqlVeiculoRepository
 from revenda.shared.db import BancoDeDados
@@ -25,8 +25,6 @@ from revenda.vendas.domain.venda import (
     Venda,
 )
 from revenda.vendas.infrastructure.repositorio_sql import SqlVendaRepository
-
-TTL = timedelta(minutes=30)
 
 
 @pytest.fixture
