@@ -1,7 +1,7 @@
 [project]
 name = "revenda"
 version = "0.1.0"
-description = "API de revenda de veículos (FIAP PósTech SOAT — Fase 3): catálogo, vendas e efetivação por webhook de pagamento."
+description = "API de revenda de veículos (FIAP PósTech SOAT, Fase 3): catálogo, vendas e efetivação por webhook de pagamento."
 requires-python = ">=3.12,<3.13"
 dependencies = [
     "alembic>=1.20.0,<1.21",

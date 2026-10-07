@@ -1,4 +1,4 @@
-"""Agregado Venda (contexto Vendas) — docs/02-modelagem-ddd.md, seção 2.5.2."""
+"""Agregado Venda (contexto Vendas): docs/02-modelagem-ddd.md, seção 2.5.2."""
 
 from __future__ import annotations
 

@@ -30,7 +30,7 @@ O bloco 5 depende do tempo real do CI e do CD. Duas formas de manter o vídeo em
 - [ ] Docker Desktop iniciado; aplicativos pesados fechados (só o Keycloak tem limite de 1536 MiB de memória; risco R-02 de [10-plano-execucao.md](10-plano-execucao.md)).
 - [ ] Plataforma e API de pé: `kubectl get pods -A` com tudo `Running` (namespaces `revenda`, `gateway`, `observabilidade`, `identidade`, `kube-system`), e o Job `revenda-migracao` `Completed`.
 - [ ] `http://localhost:8080/health/ready` responde `{"status":"ok",...}` e `http://localhost:8180/realms/revenda/.well-known/openid-configuration` responde.
-- [ ] `http://localhost:3000` abre o painel "Revenda de Veículos — visão geral" e `http://localhost:9090/targets` mostra os jobs `revenda-api` e `kong` como `UP`.
+- [ ] `http://localhost:3000` abre o painel "Revenda de Veículos: visão geral" e `http://localhost:9090/targets` mostra os jobs `revenda-api` e `kong` como `UP`.
 - [ ] Último run do CD verde em *Actions > CD*.
 - [ ] Runner `online` em *Settings > Actions > Runners* (container `revenda-runner`; se não estiver, `docker start revenda-runner` ou rode de novo `scripts\windows\03-instalar-runner.ps1`).
 - [ ] Para o bloco 8 (opcional, se for rodar a suíte ao vivo): `.env` criado a partir do `.env.example` e `docker compose up -d postgres` (porta 5432, não conflita com o kind).
@@ -121,14 +121,14 @@ O mesmo, em Git Bash: `kubectl -n identidade get secret keycloak-gestor -o jsonp
 
 ## 11.4 Roteiro por bloco
 
-### Bloco 1 — Abertura e problema (0:00 a 0:45)
+### Bloco 1: Abertura e problema (0:00 a 0:45)
 
 **Tela**: README do repositório no GitHub (topo, com o badge do CI), depois a seção "1. O que é".
 
 **Fala sugerida**:
 > Olá, eu sou o Cainã Clímaco, e este é o meu Trabalho Substitutivo da Fase 3 do Tech Challenge da PósTech de Software Architecture. O problema é uma revenda de veículos que quer vender pela internet. Eu entrego o back-end: uma API para cadastrar e editar veículos, permitir a compra por clientes previamente cadastrados, efetivar a compra quando o pagamento é confirmado e listar os veículos à venda e os vendidos, sempre do mais barato para o mais caro. O cadastro dos clientes fica num serviço de identidade separado, e toda mudança chega ao ambiente por Pull Request e pipeline. Vou mostrar a modelagem, a arquitetura, a infraestrutura, o pipeline e um teste ponta a ponta.
 
-### Bloco 2 — Modelagem DDD e decisões (0:45 a 2:00)
+### Bloco 2: Modelagem DDD e decisões (0:45 a 2:00)
 
 **Tela**: no VS Code, pré-visualização de `docs/02-modelagem-ddd.md`: diagrama do Event Storming (seção 2.2), mapa de contextos (2.4.3), máquina de estados da Venda (2.6.2) e a tabela de regras descobertas (2.7). Em seguida, `docs/adrs/README.md`.
 
@@ -136,14 +136,14 @@ O mesmo, em Git Bash: `kubectl -n identidade get secret keycloak-gestor -o jsonp
 > Comecei pela modelagem. No Event Storming aparecem os eventos do processo: veículo cadastrado, compra iniciada, veículo reservado, pagamento aprovado ou recusado, venda efetivada e reserva expirada. Daí saíram quatro contextos: Vendas, que é o subdomínio principal; Catálogo, de suporte; Identidade, genérico, resolvido com o Keycloak; e o gateway de pagamento, externo. Vendas conversa com Catálogo por uma porta, e o webhook do gateway funciona como camada anticorrupção.
 > O enunciado avisa que nem tudo está descrito, então a modelagem descobriu regras: a compra reserva o veículo por 30 minutos, o preço fica congelado, veículo reservado não pode ser editado, um veículo só pode ter uma venda ativa e o gestor não compra. As decisões estão registradas em dezesseis ADRs, como Keycloak, monólito modular, concorrência por UPDATE condicional, expiração preguiçosa, identidade em repositório próprio, API Gateway com Kong e monitoramento com Prometheus e Grafana.
 
-### Bloco 3 — Arquitetura e separação de dados (2:00 a 3:00)
+### Bloco 3: Arquitetura e separação de dados (2:00 a 3:00)
 
 **Tela**: `docs/04-arquitetura.md`, diagrama C4 de containers (seção 3) e, rapidamente, o diagrama de implantação (seção 5). Depois `docs/07-seguranca-lgpd.md`, seção 5.2 (tabela de princípios).
 
 **Fala sugerida**:
 > A solução tem dois sistemas. A revenda-api é um monólito modular em Python com FastAPI, com os módulos Catálogo e Vendas em Clean Architecture, e um PostgreSQL com um schema por módulo. O Keycloak fica em outro repositório, com pipeline, Terraform e state próprios, em outro namespace e com outro PostgreSQL. Essa é a separação que o enunciado pede: nome, e-mail, CPF e telefone existem só no banco do Keycloak. A API valida o token e guarda na venda apenas o identificador opaco do usuário. Isso aplica o princípio da necessidade da LGPD, artigo 6º, inciso III: o banco transacional não tem dados pessoais diretos, e a ligação com a pessoa só existe no serviço de identidade, mantido separadamente.
 
-### Bloco 4 — Infraestrutura (3:00 a 4:15)
+### Bloco 4: Infraestrutura (3:00 a 4:15)
 
 **Tela e comandos** (PowerShell):
 
@@ -168,7 +168,7 @@ Por fim, no GitHub: *Settings > Actions > Runners*, mostrando o runner online co
 > Tudo roda no meu PC, sem nuvem. O cluster é um kind de um nó, criado pela CLI do kind a partir deste arquivo. No começo eu usava o provider do kind no Terraform, mas o binário dele não é assinado e o Smart App Control do Windows 11 bloqueou. Então a CLI cria o cluster, e cada repositório tem o seu Terraform para o que fica dentro dele. O da API cuida dos namespaces revenda, gateway e observabilidade: o PostgreSQL da API, o Kong, o Prometheus e o Grafana, as NetworkPolicies, o metrics-server e as senhas, que são geradas aleatoriamente e viram Secrets. O do serviço de identidade cuida do namespace identidade, com o Keycloak, o realm e o PostgreSQL dele. Nada sensível está nos repositórios; os dois states ficam no meu perfil de usuário.
 > Aqui estão os pods: a API com duas réplicas e HPA, o Kong, o Prometheus e o Grafana, os dois bancos e o Keycloak. E estes são os runners self-hosted do GitHub Actions, um por repositório: rodam em containers Linux no Docker Desktop, ligados à rede do kind, e são eles que fazem o deploy.
 
-### Bloco 5 — Pipeline (4:15 a 6:15)
+### Bloco 5: Pipeline (4:15 a 6:15)
 
 **Tela e comandos**:
 
@@ -187,7 +187,7 @@ Por fim, no GitHub: *Settings > Actions > Runners*, mostrando o runner online co
 > Nenhuma mudança vai direto para a main. Este script cria a branch, faz o commit e abre o Pull Request. O CI roda no runner do GitHub: lint, tipagem e regras de arquitetura; testes de unidade e integração com cobertura mínima de 80%; build da imagem com varredura do Trivy; e validação do Terraform e dos manifestos. Esses quatro checks são obrigatórios na proteção da main, que também exige PR, histórico linear e vale até para mim como administrador.
 > Com tudo verde, faço o squash merge. O push na main dispara o CD no meu runner: ele garante o cluster, aplica o Terraform, constrói a imagem com a tag do commit, carrega no kind, roda a migração num Job e só então atualiza o Deployment. No fim, roda os testes ponta a ponta contra o ambiente real, com tokens reais do Keycloak. Aqui está o resumo: a imagem implantada e todos os testes e2e passando.
 
-### Bloco 6 — Uso ponta a ponta (6:15 a 10:00)
+### Bloco 6: Uso ponta a ponta (6:15 a 10:00)
 
 Todas as chamadas pelo Swagger UI (`http://localhost:8080/docs`), *Try it out* > *Execute*. Mostre sempre o código de status e o corpo da resposta.
 
@@ -212,7 +212,7 @@ Se sobrar tempo: `GET /api/v1/veiculos/a-venda` de novo (o Argo não aparece mai
 > A cliente compra o Argo. A resposta é 201: a venda está aguardando pagamento, com um código de pagamento e prazo de 30 minutos. O veículo fica reservado e o preço está congelado. Se outro cliente tenta comprar o mesmo carro, recebe 409: veículo indisponível. Isso é garantido no banco, por um UPDATE condicional e um índice único parcial.
 > Agora faço o papel do gateway de pagamento: ele chama o webhook com o código e o resultado APROVADO, autenticado por um segredo compartilhado no header. A venda é efetivada e o veículo passa a vendido. Ele aparece na lista de vendidos, também ordenada por preço, e a cliente vê a compra efetivada em minhas compras.
 
-### Trecho opcional — API Gateway e monitoramento (cerca de 1 min, no fim do bloco 6 ou com corte)
+### Trecho opcional: API Gateway e monitoramento (cerca de 1 min, no fim do bloco 6 ou com corte)
 
 **Tela**: terminal (Git Bash) e, depois, o navegador no Grafana e no Prometheus.
 
@@ -231,7 +231,7 @@ Depois: `http://localhost:3000` (linhas Negócio, API e Kong, com a venda que ac
 **Fala sugerida**:
 > Na frente da API há um API Gateway, o Kong, em modo declarativo: a configuração está versionada no repositório e é validada no CI. Ele é a única entrada: limita requisições por IP, com limite menor na compra, gera o X-Request-ID e só deixa o webhook passar com a credencial do gateway de pagamento; sem ela, a resposta 401 vem do próprio Kong, e a API valida o segredo de novo. O /metrics nem é publicado. As métricas da API e do Kong vão para um Prometheus no cluster, e o Grafana mostra o painel de negócio e os golden signals. As regras de alerta também estão no repositório, com testes no CI.
 
-### Bloco 7 — Prova da separação de dados (10:00 a 10:50)
+### Bloco 7: Prova da separação de dados (10:00 a 10:50)
 
 **Tela e comandos** (PowerShell, com `$env:PGPASSWORD` definido na [seção 11.3](#113-comandos-para-obter-os-segredos-powershell)):
 
@@ -255,7 +255,7 @@ Em seguida, console admin `http://localhost:8180/admin/` (usuário `admin`) > se
 **Fala sugerida**:
 > Para provar a separação, abro o banco da API. A tabela de vendas tem o veículo, o preço, o status e o comprador_id, que é só um UUID. Não há coluna de nome, e-mail, CPF ou telefone. Esse mesmo UUID é o ID do usuário no Keycloak, e só lá estão os dados pessoais, num outro PostgreSQL, em outro namespace, que nem é exposto fora do cluster. A API não tem credencial para esse banco.
 
-### Bloco 8 — Qualidade (10:50 a 11:30)
+### Bloco 8: Qualidade (10:50 a 11:30)
 
 **Tela**: *Actions > CI* > último run da `main` > job `testes` > passo "Unidade + integracao com cobertura (minimo 80%)", rolando até a linha `TOTAL` do relatório. Opcionalmente, ao vivo (com o PostgreSQL do compose de pé e `TEST_DATABASE_URL` definido como no [README](../README.md#41-unidade-e-integração)):
 
@@ -267,7 +267,7 @@ uv run lint-imports
 **Fala sugerida**:
 > A suíte tem testes de unidade para o domínio e os casos de uso, com relógio fixo, e testes de integração contra um PostgreSQL real, incluindo o teste de concorrência que dispara compras simultâneas do mesmo carro. O CI exige 80% de cobertura; a suíte chega a cerca de 99%. O import-linter garante as regras da Clean Architecture, e os testes ponta a ponta rodam a cada deploy.
 
-### Bloco 9 — Encerramento (11:30 a 12:00)
+### Bloco 9: Encerramento (11:30 a 12:00)
 
 **Tela**: README no GitHub, seção "2.12 Documentação" (tabela de docs e ADRs).
 

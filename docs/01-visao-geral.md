@@ -1,6 +1,6 @@
 # 1. Visão geral
 
-Este documento apresenta o problema de negócio, o objetivo, o escopo, os atores, as premissas e as restrições do projeto **Revenda de Veículos — API**, desenvolvido como Trabalho Substitutivo da Fase 3 do Tech Challenge (FIAP PósTech, Software Architecture). Serve como porta de entrada da documentação: quem lê este arquivo primeiro sabe o que foi construído, para quem e onde encontrar cada detalhe.
+Este documento apresenta o problema de negócio, o objetivo, o escopo, os atores, as premissas e as restrições do projeto **Revenda de Veículos: API**, desenvolvido como Trabalho Substitutivo da Fase 3 do Tech Challenge (FIAP PósTech, Software Architecture). Serve como porta de entrada da documentação: quem lê este arquivo primeiro sabe o que foi construído, para quem e onde encontrar cada detalhe.
 
 ## 1.1 Problema de negócio
 
@@ -15,7 +15,7 @@ A interface (front-end) é responsabilidade de outros times. Este projeto entreg
 
 ## 1.2 Objetivo
 
-Entregar uma API REST funcional, testada e implantada de forma automatizada que suporte o ciclo completo de venda — cadastro do veículo, cadastro do cliente, compra, reserva, efetivação por confirmação de pagamento e cancelamento — com:
+Entregar uma API REST funcional, testada e implantada de forma automatizada que suporte o ciclo completo de venda (cadastro do veículo, cadastro do cliente, compra, reserva, efetivação por confirmação de pagamento e cancelamento) com:
 
 1. serviço de identidade separado (Keycloak) guardando os dados pessoais em banco próprio, entregue em repositório próprio ([fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade), [ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md));
 2. garantia de que um mesmo veículo não seja vendido duas vezes, mesmo sob acesso concorrente;
@@ -108,4 +108,4 @@ Entregar uma API REST funcional, testada e implantada de forma automatizada que 
 | 11 | [Roteiro do vídeo](11-roteiro-video.md) | Roteiro da demonstração em vídeo, checklist de preparação e comandos |
 | 12 | [Observabilidade](12-observabilidade.md) | Logs, métricas, Prometheus e Grafana no cluster, golden signals, SLIs/SLOs, alertas ativos e plano de APM |
 | 13 | [Design Approval Sheet](13-das.md) | Folha de aprovação do desenho: escopo, decisões, atributos de qualidade, riscos, custos e aprovação |
-| — | [ADRs](adrs/README.md) | Registros de decisões de arquitetura |
+| | [ADRs](adrs/README.md) | Registros de decisões de arquitetura |

@@ -35,7 +35,7 @@ Restrições:
 - **Regras de alerta versionadas** em `infra/observabilidade/alertas.yml`, em três grupos: `revenda-api` (`RevendaApiFora`, `RevendaErros5xxAltos`, `RevendaListagensLentas`, `RevendaHpaNoMaximo`, `RevendaWebhookRecusado`), `negocio` (`RevendaRecusasDePagamentoAltas`) e `gateway` (`KongFora`, `KongRejeicoesNaBorda`). Testes de unidade em `infra/observabilidade/alertas.test.yml`.
 - **Sem Alertmanager**: os alertas aparecem em `http://localhost:9090/alerts` e no painel ("Alertas disparando"). Em produção, o Alertmanager enviaria para o canal da equipe.
 - **Grafana 13.2.3**, NodePort 30300 → `http://localhost:3000`.
-  - Fonte de dados (`uid: prometheus`) e painel provisionados por arquivo (`infra/observabilidade/grafana/`); o painel `revenda-visao-geral` ("Revenda de Veículos — visão geral") é a página inicial e não pode ser alterado pela interface.
+  - Fonte de dados (`uid: prometheus`) e painel provisionados por arquivo (`infra/observabilidade/grafana/`); o painel `revenda-visao-geral` ("Revenda de Veículos: visão geral") é a página inicial e não pode ser alterado pela interface.
   - Acesso anônimo como **Viewer**; o admin tem senha aleatória gerada pelo Terraform no Secret `observabilidade/grafana-admin`.
 - **CI** (job `infra`): `promtool check config`, `promtool check rules`, `promtool test rules` e validação do JSON do painel com `jq` (uid e fonte de dados).
 - **CD**: etapa "Monitoramento" que espera ao menos um alvo `up` dos jobs `revenda-api` e `kong`, confere que os três grupos de regras foram carregados e que o Grafana responde com o painel provisionado.
@@ -65,6 +65,6 @@ Restrições:
 ## Referências
 - [12-observabilidade.md](../12-observabilidade.md) (painel, alertas, consultas)
 - [08-ci-cd-infra.md](../08-ci-cd-infra.md) (recursos Terraform e etapas do CI/CD)
-- [Prometheus — Kubernetes service discovery](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#kubernetes_sd_config)
-- [Prometheus — Unit testing for rules](https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/)
-- [Grafana — Provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/)
+- [Prometheus: Kubernetes service discovery](https://prometheus.io/docs/prometheus/latest/configuration/configuration/#kubernetes_sd_config)
+- [Prometheus: Unit testing for rules](https://prometheus.io/docs/prometheus/latest/configuration/unit_testing_rules/)
+- [Grafana: Provisioning](https://grafana.com/docs/grafana/latest/administration/provisioning/)

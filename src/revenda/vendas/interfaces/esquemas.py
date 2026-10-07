@@ -57,7 +57,7 @@ class PaginaVendas(ModeloResposta):
 
 
 class NotificacaoPagamento(ModeloRequisicao):
-    """Payload do gateway — vocabulário externo, traduzido pela ACL do webhook."""
+    """Payload do gateway: vocabulário externo, traduzido pela ACL do webhook."""
 
     codigo_pagamento: Annotated[
         str, Field(pattern=PADRAO_CODIGO_PAGAMENTO, examples=["PAG-3f9a1c0b7e21"])

@@ -1,4 +1,4 @@
-# infra — plataforma local (kind)
+# infra: plataforma local (kind)
 
 A plataforma é definida por código em duas partes ([ADR-005](../docs/adrs/ADR-005-kind-terraform-nodeport.md), [docs/08](../docs/08-ci-cd-infra.md)):
 

@@ -1,4 +1,4 @@
-# 06 — Modelo de dados
+# 06. Modelo de dados
 
 Este documento descreve o modelo físico de dados da solução: as tabelas dos módulos Catálogo e Vendas no banco `revenda`, com tipos PostgreSQL, constraints e índices, a estratégia de migração com Alembic executada por um Job do Kubernetes e a separação física entre dados transacionais e dados pessoais, estes guardados apenas no banco do Keycloak. O modelo de domínio que origina estas tabelas está em [02-modelagem-ddd.md](02-modelagem-ddd.md); as decisões correspondentes estão nos [ADR-004](adrs/ADR-004-postgresql-schemas.md) e [ADR-008](adrs/ADR-008-concorrencia-update-condicional.md).
 
@@ -56,11 +56,11 @@ Cardinalidade: um veículo pode ter várias vendas ao longo do tempo (canceladas
 | Coluna | Tipo | Nulo | Padrão | Observação |
 |---|---|---|---|---|
 | `id` | `UUID` | não | gerado pela aplicação (uuid4) | PK |
-| `marca` | `VARCHAR(60)` | não | — | |
-| `modelo` | `VARCHAR(60)` | não | — | |
-| `ano` | `SMALLINT` | não | — | Faixa de negócio (1950..ano corrente + 1) validada no domínio |
-| `cor` | `VARCHAR(30)` | não | — | |
-| `preco` | `NUMERIC(12,2)` | não | — | Mapeado para `Decimal` no Python |
+| `marca` | `VARCHAR(60)` | não | | |
+| `modelo` | `VARCHAR(60)` | não | | |
+| `ano` | `SMALLINT` | não | | Faixa de negócio (1950..ano corrente + 1) validada no domínio |
+| `cor` | `VARCHAR(30)` | não | | |
+| `preco` | `NUMERIC(12,2)` | não | | Mapeado para `Decimal` no Python |
 | `status` | `VARCHAR(12)` | não | `'A_VENDA'` | |
 | `versao` | `INTEGER` | não | `1` | Incrementada em toda alteração (edição e transições) |
 | `criado_em` | `TIMESTAMPTZ` | não | `now()` | Sempre UTC |

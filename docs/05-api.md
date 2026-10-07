@@ -1,4 +1,4 @@
-# 05 — Contrato da API
+# 05. Contrato da API
 
 Este documento é o contrato HTTP da `revenda-api`: convenções gerais, autenticação e autorização, formato de erros e paginação e, para cada endpoint, papel exigido, parâmetros, exemplos de requisição e resposta e códigos de erro. Ele é a referência para o time de front-end e para os testes de API e e2e ([09-testes.md](09-testes.md)). A especificação OpenAPI gerada pela aplicação, disponível em `http://localhost:8080/docs` (Swagger UI) e `http://localhost:8080/openapi.json`, deve permanecer coerente com este documento. As regras de negócio por trás dos códigos de erro estão em [02-modelagem-ddd.md](02-modelagem-ddd.md).
 
@@ -42,8 +42,8 @@ No ambiente kind, toda requisição passa pelo Kong antes de chegar à API ([ADR
 | `api` | `/api/v1/*` (todos os métodos) | *Rate limiting* de 600 requisições por minuto por IP |
 | `compra` | `POST /api/v1/vendas` | *Rate limiting* de 60 requisições por minuto por IP |
 | `webhook-pagamento` | `POST /api/v1/pagamentos/webhook` | key-auth pelo header `X-Webhook-Secret` + ACL (só o consumer `gateway-pagamento`) |
-| `documentacao` | `GET /docs`, `GET /openapi.json` | — |
-| `saude` | `GET /health/*` | — |
+| `documentacao` | `GET /docs`, `GET /openapi.json` | |
+| `saude` | `GET /health/*` | |
 
 > **"Por IP" no ambiente kind.** O tráfego do host entra por `127.0.0.1:8080` → porta 30080 do nó (`extraPortMappings` do kind) → Service NodePort do Kong, e o kube-proxy faz SNAT nesse caminho: o Kong enxerga o mesmo endereço de origem para todos os clientes. Na prática, os limites de 600/min e 60/min são **globais** para o ambiente local: um cliente consome a cota dos outros, e um teste de carga pelo gateway recebe 429 em segundos (ver `tests/carga/README.md` para elevar o limite durante a medição). Em produção, o limite por cliente real exige um balanceador que preserve o IP de origem com `real_ip_header`/`trusted_ips` no Kong, ou `limit_by: consumer` nas rotas autenticadas ([ADR-015](adrs/ADR-015-api-gateway-kong.md), consequências negativas).
 
@@ -117,7 +117,7 @@ Catálogo de tipos de problema:
 |---|---|---|
 | Swagger UI (`/docs`) e front-end | Authorization Code + PKCE (S256) | `revenda-swagger` (público) |
 | Testes e2e (somente ambiente local) | Resource Owner Password Credentials | `revenda-e2e` (público, `directAccessGrantsEnabled`) |
-| Gateway de pagamento | Não usa OAuth; segredo compartilhado no header `X-Webhook-Secret` | — |
+| Gateway de pagamento | Não usa OAuth; segredo compartilhado no header `X-Webhook-Secret` | |
 
 Endpoints do Keycloak (realm `revenda`, implantado pelo repositório [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade)), a partir do host:
 
@@ -147,7 +147,7 @@ O access token é um JWT assinado com **RS256**. A API rejeita com `401` qualque
 |---|---|---|
 | `cliente` | Pessoa que se autocadastrou | Papel padrão do realm (default roles), concedido no registro |
 | `gestor` | Funcionário da loja | Atribuído pelo administrador do realm; usuário seed `gestor.loja` |
-| público | Qualquer pessoa, sem token | — |
+| público | Qualquer pessoa, sem token | |
 
 O usuário `gestor.loja` **não** recebe o papel `cliente` (por isso o passo 4 do roteiro, "gestor tenta comprar", resulta em `403`). Mesmo um token que tenha os dois papéis é recusado com `403` em `POST /api/v1/vendas`: gestor não compra (RN-05, segregação de funções).
 
@@ -252,7 +252,7 @@ Indica que a instância pode receber tráfego (readiness): executa `SELECT 1` no
 |---|---|
 | 503 | Banco inacessível; corpo `problem+json` com `type` `urn:revenda:problema:indisponivel` e `verificacoes.banco = "falha"` |
 
-### 4.3 `POST /api/v1/veiculos` — cadastrar veículo
+### 4.3 `POST /api/v1/veiculos`: cadastrar veículo
 
 Papel: **gestor**. Cria um veículo com status `A_VENDA` e `versao = 1`. Evento: `VeiculoCadastrado`.
 
@@ -297,7 +297,7 @@ Content-Type: application/json
 | 403 | Token sem papel `gestor` |
 | 422 | Campo ausente ou fora das regras (ex.: `ano` 1949 ou `"2023"` como texto, `preco` `"0.00"`, `preco` como número com mais de 2 casas, `marca` com quebra de linha) |
 
-### 4.4 `PATCH /api/v1/veiculos/{id}` — editar veículo
+### 4.4 `PATCH /api/v1/veiculos/{id}`: editar veículo
 
 Papel: **gestor**. Atualização parcial de `marca`, `modelo`, `ano`, `cor` e/ou `preco` (ao menos um campo). Só é permitida com o veículo em `A_VENDA`; a expiração preguiçosa é aplicada antes da leitura, então um veículo `RESERVADO` por venda já vencida volta a `A_VENDA` e aceita a edição ([ADR-009](adrs/ADR-009-expiracao-preguicosa.md)). `status`, `versao` e datas não são editáveis (campos desconhecidos ou somente leitura resultam em 422). Corpo `application/json` com semântica de *merge* (campos ausentes não mudam). Evento: `VeiculoEditado`.
 
@@ -336,7 +336,7 @@ Content-Type: application/json
 | 409 `conflito-concorrencia` | O veículo mudou entre a leitura e a gravação (ex.: foi reservado no mesmo instante) |
 | 422 | Corpo vazio, campo inválido ou campo não editável |
 
-### 4.5 `GET /api/v1/veiculos/{id}` — consultar veículo
+### 4.5 `GET /api/v1/veiculos/{id}`: consultar veículo
 
 Papel: **público**. Retorna o veículo em qualquer status. Se o veículo estiver `RESERVADO` por uma venda já vencida, a expiração preguiçosa é aplicada antes da leitura e a resposta mostra o veículo `A_VENDA` ([ADR-009](adrs/ADR-009-expiracao-preguicosa.md)).
 
@@ -351,7 +351,7 @@ Resposta `200`: representação de Veículo (seção 3.1).
 | 404 | Veículo inexistente |
 | 422 | `id` não é UUID |
 
-### 4.6 `GET /api/v1/veiculos/a-venda` — listar veículos à venda
+### 4.6 `GET /api/v1/veiculos/a-venda`: listar veículos à venda
 
 Papel: **público**. Lista os veículos com status `A_VENDA`, ordenados por `preco` ascendente; desempate por `criado_em` ascendente e, por fim, `id`. Antes da consulta, executa a varredura preguiçosa de reservas expiradas ([ADR-009](adrs/ADR-009-expiracao-preguicosa.md)).
 
@@ -393,7 +393,7 @@ GET /api/v1/veiculos/a-venda?limite=3&deslocamento=0 HTTP/1.1
 |---|---|
 | 422 | `limite` fora de 1..100 ou `deslocamento` fora de 0..1.000.000 |
 
-### 4.7 `GET /api/v1/veiculos/vendidos` — listar veículos vendidos
+### 4.7 `GET /api/v1/veiculos/vendidos`: listar veículos vendidos
 
 Papel: **público**. Lista os veículos com status `VENDIDO`, ordenados por `preco` ascendente (desempate `criado_em` e `id`). O preço exibido é o do veículo, que, por estar congelado desde a reserva, coincide com o `preco_venda` da venda efetivada.
 
@@ -419,7 +419,7 @@ Parâmetros e formato de resposta iguais aos de 4.6.
 |---|---|
 | 422 | Parâmetros de paginação inválidos |
 
-### 4.8 `POST /api/v1/vendas` — iniciar compra
+### 4.8 `POST /api/v1/vendas`: iniciar compra
 
 Papel: **cliente**. Reserva o veículo e cria a venda em `AGUARDANDO_PAGAMENTO`, com `codigo_pagamento` único (`PAG-` + 12 hexadecimais) e `expira_em` = agora + TTL (padrão 30 min). O `comprador_id` é o `sub` do token; o corpo **não** aceita dados do comprador. Eventos: `CompraIniciada`, `VeiculoReservado`.
 
@@ -459,7 +459,7 @@ Content-Type: application/json
 | 409 `veiculo-indisponivel` | Veículo `VENDIDO` ou `RESERVADO` com reserva vigente (inclui o perdedor de uma disputa concorrente) |
 | 422 | `veiculo_id` ausente ou não UUID |
 
-### 4.9 `GET /api/v1/vendas/minhas` — minhas compras
+### 4.9 `GET /api/v1/vendas/minhas`: minhas compras
 
 Papel: **cliente**. Lista as vendas cujo `comprador_id` é o `sub` do token, em todos os status, ordenadas por `criada_em` descendente. Parâmetros: `limite`, `deslocamento`. Reservas vencidas são expiradas antes da consulta, para que nenhuma apareça como `AGUARDANDO_PAGAMENTO`.
 
@@ -492,7 +492,7 @@ Papel: **cliente**. Lista as vendas cujo `comprador_id` é o `sub` do token, em 
 | 403 | Token sem papel `cliente` |
 | 422 | Paginação inválida |
 
-### 4.10 `GET /api/v1/vendas/{id}` — consultar venda
+### 4.10 `GET /api/v1/vendas/{id}`: consultar venda
 
 Papel: **dono** (cliente cujo `sub` = `comprador_id`) ou **gestor**. Para um cliente que não é o dono, a API responde `404` (e não `403`), para não revelar a existência da venda (proteção contra BOLA/IDOR). Se a venda está `AGUARDANDO_PAGAMENTO` com a reserva vencida, ela é cancelada com `RESERVA_EXPIRADA` (e o veículo liberado) antes da resposta.
 
@@ -524,7 +524,7 @@ Authorization: Bearer eyJ...   (gestor)
 | 403 | Token sem papel `cliente` nem `gestor` |
 | 404 | Venda inexistente, ou cliente que não é o dono |
 
-### 4.11 `GET /api/v1/vendas` — listar vendas (gestão)
+### 4.11 `GET /api/v1/vendas`: listar vendas (gestão)
 
 Papel: **gestor**. Lista todas as vendas, ordenadas por `criada_em` descendente, com `comprador_id`. Como em 4.9, reservas vencidas são expiradas antes da consulta (o filtro `status=AGUARDANDO_PAGAMENTO` nunca devolve reserva vencida).
 
@@ -565,7 +565,7 @@ Authorization: Bearer eyJ...   (gestor)
 | 403 | Token sem papel `gestor` |
 | 422 | `status` inválido ou paginação inválida |
 
-### 4.12 `POST /api/v1/vendas/{id}/cancelar` — cancelar venda
+### 4.12 `POST /api/v1/vendas/{id}/cancelar`: cancelar venda
 
 Papel: **dono** ou **gestor**. Cancela uma venda `AGUARDANDO_PAGAMENTO` e libera o veículo (`RESERVADO` → `A_VENDA`). O motivo é derivado de quem cancela: `DESISTENCIA_COMPRADOR` (dono) ou `CANCELADA_PELA_LOJA` (gestor). Sem corpo. Eventos: `VendaCancelada` (sempre), mais `CompraCanceladaPeloComprador` quando quem cancela é o dono, e `VeiculoLiberado`.
 
@@ -599,7 +599,7 @@ Se a reserva já estiver vencida no momento do cancelamento, a venda é cancelad
 | 404 | Venda inexistente, ou cliente que não é o dono |
 | 409 `transicao-invalida` | Venda `EFETIVADA` ou `CANCELADA` |
 
-### 4.13 `POST /api/v1/pagamentos/webhook` — notificação do gateway
+### 4.13 `POST /api/v1/pagamentos/webhook`: notificação do gateway
 
 Chamador: **gateway de pagamento** (simulado por Swagger UI ou curl). Não usa JWT; a autenticação é o segredo compartilhado no header `X-Webhook-Secret`. No ambiente kind ela acontece duas vezes: primeiro no Kong (key-auth: o valor precisa ser a credencial do consumer `gateway-pagamento`, e o plugin ACL só deixa passar esse consumer) e depois na API, que compara em tempo constante com o valor do Secret `revenda-webhook-secret` (o mesmo segredo; defesa em profundidade). O endpoint é a camada anticorrupção de Vendas: traduz o payload do gateway em `ProcessarPagamento(codigo, aprovado)`.
 
@@ -671,10 +671,10 @@ Responde no formato de exposição de texto do Prometheus (`text/plain; version=
 |---|---|---|---|
 | `revenda_http_requisicoes_total` | contador | `metodo`, `rota`, `status` | Requisições atendidas |
 | `revenda_http_requisicao_duracao_segundos` | histograma (faixas de 5 ms a 5 s) | `metodo`, `rota`, `status` | Latência das requisições |
-| `revenda_vendas_iniciadas_total` | contador | — | Compras iniciadas (`CompraIniciada`) |
-| `revenda_vendas_efetivadas_total` | contador | — | Vendas efetivadas pelo webhook |
+| `revenda_vendas_iniciadas_total` | contador | nenhum | Compras iniciadas (`CompraIniciada`) |
+| `revenda_vendas_efetivadas_total` | contador | nenhum | Vendas efetivadas pelo webhook |
 | `revenda_vendas_canceladas_total` | contador | `motivo` | Vendas canceladas, por motivo (`PAGAMENTO_RECUSADO`, `DESISTENCIA_COMPRADOR`, `CANCELADA_PELA_LOJA`, `RESERVA_EXPIRADA`) |
-| `revenda_veiculos_cadastrados_total` | contador | — | Veículos cadastrados |
+| `revenda_veiculos_cadastrados_total` | contador | nenhum | Veículos cadastrados |
 
 O rótulo `rota` é o **template** da rota (ex.: `/api/v1/vendas/{venda_id}`), nunca o caminho com o identificador, para manter a cardinalidade baixa; caminhos inexistentes (404) usam `nao_mapeada`. A resposta inclui também as métricas padrão do processo Python (`process_*`, `python_*`). Exemplo de trecho da resposta:
 

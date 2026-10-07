@@ -1,4 +1,4 @@
-"""Agregado Veiculo (contexto Catálogo) — docs/02-modelagem-ddd.md, seção 2.5.1."""
+"""Agregado Veiculo (contexto Catálogo): docs/02-modelagem-ddd.md, seção 2.5.1."""
 
 from __future__ import annotations
 
@@ -43,7 +43,7 @@ class StatusVeiculo(StrEnum):
 
 
 class Transicao(Enum):
-    """Transições de status permitidas — fonte única da regra.
+    """Transições de status permitidas: fonte única da regra.
 
     O repositório aplica a mesma pré-condição no UPDATE condicional (ADR-008) lendo
     `origem`/`destino` daqui, em vez de repetir literais no SQL.

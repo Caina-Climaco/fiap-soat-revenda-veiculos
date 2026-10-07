@@ -1,4 +1,4 @@
-# 04 — Arquitetura
+# 04. Arquitetura
 
 Este documento descreve a arquitetura da API de revenda de veículos em dois níveis: a visão de alto nível (HLD), com o estilo arquitetural, os atributos de qualidade e os diagramas C4 de contexto, containers e componentes, e a visão de baixo nível (LLD), com a organização do código, as responsabilidades por camada e a forma como os módulos colaboram dentro de uma mesma transação. Também apresenta a visão de implantação no cluster kind e os principais fluxos em diagramas de sequência. As decisões aqui resumidas estão justificadas nos [ADRs](adrs/README.md); o modelo de domínio está em [02-modelagem-ddd.md](02-modelagem-ddd.md), o contrato HTTP em [05-api.md](05-api.md) e o modelo físico em [06-dados.md](06-dados.md).
 
@@ -31,7 +31,7 @@ Na frente da API há um **API Gateway** (Kong DB-less, namespace `gateway`), ún
 | 6 | **Disponibilidade (local)** | A queda de uma réplica da API não interrompe as requisições | 2 réplicas, readiness probe, HPA 2..5; alertas `RevendaApiFora` e `KongFora` no Prometheus |
 | 7 | **Desempenho** | Listagens públicas respondem em p95 < 300 ms com 1.000 veículos | Índice `(status, preco)`, paginação obrigatória com limite máximo 100 |
 
-## 2. C4 nível 1 — Contexto
+## 2. C4 nível 1: Contexto
 
 ```mermaid
 C4Context
@@ -59,7 +59,7 @@ Pontos de atenção do contexto:
 - A API **não** chama o Keycloak a cada requisição; ela apenas baixa e mantém em cache o JWKS (chaves públicas) para validar tokens localmente.
 - O gateway inicia a comunicação (push). A API não chama o gateway: a criação da cobrança é simulada pela geração do `codigo_pagamento` ([ADR-007](adrs/ADR-007-pagamento-webhook.md)).
 
-## 3. C4 nível 2 — Containers
+## 3. C4 nível 2: Containers
 
 ```mermaid
 C4Container
@@ -115,7 +115,7 @@ C4Container
 
 Os dois últimos containers são implantados pelo repositório de identidade; os detalhes deles estão no `README.md` daquele repositório. Este repositório só consome o contrato (issuer, JWKS, audiência, papéis).
 
-## 4. C4 nível 3 — Componentes da `revenda-api`
+## 4. C4 nível 3: Componentes da `revenda-api`
 
 O diagrama a seguir usa `flowchart` com subgraphs no estilo C4, porque o `C4Component` do Mermaid não representa bem camadas aninhadas dentro de cada módulo. As setas indicam **dependência de código** (quem conhece quem); a regra de dependência aponta sempre para o domínio.
 

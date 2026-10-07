@@ -21,8 +21,8 @@ flowchart TB
 | Unidade | `unit` | ~70% dos testes | Agregados `Veiculo` e `Venda` (transições, invariantes, expiração, idempotência), value objects (código de pagamento, preço, ano), casos de uso com repositórios em memória, `CatalogoPort` falso e relógio fixo; validação de JWT com chave RSA gerada no teste; regras de arquitetura (imports) | SQL, HTTP, Keycloak | Nada externo |
 | Integração | `integration` | ~25% | Repositórios SQLAlchemy contra PostgreSQL 16 (ordenação, paginação, índice único parcial, UPDATE condicional); concorrência real (N compras simultâneas do mesmo veículo); API completa com `TestClient` (status HTTP, `problem+json`, autorização por papel, webhook); migrações Alembic aplicadas do zero | Keycloak real, cluster | PostgreSQL (docker compose localmente; *service container* no CI) |
 | Ponta a ponta | `e2e` | ~5% | Fluxo do roteiro do vídeo contra o ambiente implantado no kind, pelo API Gateway: tokens reais do Keycloak, compra, webhook, efetivação, listagens; regras de borda do Kong (*rate limiting*, `X-Request-ID`, `/metrics` fechado, webhook barrado ou encaminhado) | Casos de borda já cobertos abaixo | Cluster kind com o Kong (8080) na frente da API e Keycloak (8180, implantado pelo repositório de identidade) |
-| Configuração de infraestrutura | — (CI, job `infra`) | — | Configuração declarativa do Kong (`kong config parse`); regras de alerta do Prometheus com testes de unidade (`promtool test rules`); configuração do Prometheus e JSON do painel | Comportamento em execução (coberto pelo e2e e pela etapa "Monitoramento" do CD) | Docker (imagens `kong:3.9.3` e `prom/prometheus:v3.14.0`) |
-| Carga | — (script k6, fora do pytest) | — | Meta de desempenho das listagens (RNF-10) e reação do HPA (RNF-09) | Correção funcional | Cluster kind ou docker compose, k6 |
+| Configuração de infraestrutura | Nenhum (CI, job `infra`) | | Configuração declarativa do Kong (`kong config parse`); regras de alerta do Prometheus com testes de unidade (`promtool test rules`); configuração do Prometheus e JSON do painel | Comportamento em execução (coberto pelo e2e e pela etapa "Monitoramento" do CD) | Docker (imagens `kong:3.9.3` e `prom/prometheus:v3.14.0`) |
+| Carga | Nenhum (script k6, fora do pytest) | | Meta de desempenho das listagens (RNF-10) e reação do HPA (RNF-09) | Correção funcional | Cluster kind ou docker compose, k6 |
 
 ## 9.2 Ferramentas
 
@@ -110,7 +110,7 @@ Observações:
 | BDD-08 | Reserva expirada | unidade e integração (relógio fixo); saneamento pelo CronJob em `unit/test_expirar.py` e `integration/test_expirar.py` | RF-15, RN-04, RN-14 |
 | BDD-09 | Listagens ordenadas por preço | integração e e2e | RF-06, RF-07, RN-17 |
 
-### 9.5.1 BDD-01 — Compra com sucesso e efetivação
+### 9.5.1 BDD-01: Compra com sucesso e efetivação
 
 ```gherkin
 # language: pt
@@ -144,7 +144,7 @@ Funcionalidade: Compra de veículo pela internet
     E a venda continua "EFETIVADA" com a mesma data de efetivação
 ```
 
-### 9.5.2 BDD-02 — Pagamento recusado
+### 9.5.2 BDD-02: Pagamento recusado
 
 ```gherkin
 # language: pt
@@ -160,7 +160,7 @@ Funcionalidade: Recusa de pagamento
     E o veículo volta a aparecer na lista de veículos à venda
 ```
 
-### 9.5.3 BDD-03 — Compra concorrente
+### 9.5.3 BDD-03: Compra concorrente
 
 ```gherkin
 # language: pt
@@ -178,7 +178,7 @@ Funcionalidade: Proteção contra venda dupla
 
 Implementação: teste de integração com `threading.Barrier` e uma sessão de banco por thread, para que as transações concorram de fato no PostgreSQL.
 
-### 9.5.4 BDD-04 — Compra sem cadastro
+### 9.5.4 BDD-04: Compra sem cadastro
 
 ```gherkin
 # language: pt
@@ -194,7 +194,7 @@ Funcionalidade: Compra exige cadastro prévio
     E nenhuma venda é criada
 ```
 
-### 9.5.5 BDD-05 — Gestor tentando comprar
+### 9.5.5 BDD-05: Gestor tentando comprar
 
 ```gherkin
 # language: pt
@@ -209,7 +209,7 @@ Funcionalidade: Segregação de funções
     E nenhuma venda é criada
 ```
 
-### 9.5.6 BDD-06 — Edição de veículo reservado
+### 9.5.6 BDD-06: Edição de veículo reservado
 
 ```gherkin
 # language: pt
@@ -230,7 +230,7 @@ Funcionalidade: Edição restrita a veículos à venda
     E o preço do veículo passa a ser R$ 90.000,00
 ```
 
-### 9.5.7 BDD-07 — Webhook com segredo inválido
+### 9.5.7 BDD-07: Webhook com segredo inválido
 
 ```gherkin
 # language: pt
@@ -250,7 +250,7 @@ Funcionalidade: Autenticação do gateway de pagamento
       | "segredo-errado"   |
 ```
 
-### 9.5.8 BDD-08 — Reserva expirada
+### 9.5.8 BDD-08: Reserva expirada
 
 ```gherkin
 # language: pt
@@ -281,7 +281,7 @@ Funcionalidade: Expiração da reserva
     Então o veículo "Hyundai HB20 2021 azul" aparece na lista
 ```
 
-### 9.5.9 BDD-09 — Listagens ordenadas por preço
+### 9.5.9 BDD-09: Listagens ordenadas por preço
 
 ```gherkin
 # language: pt
