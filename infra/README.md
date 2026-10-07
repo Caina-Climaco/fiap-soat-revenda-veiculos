@@ -25,7 +25,7 @@ O cluster kind `revenda` é a **plataforma local compartilhada** com o serviço 
 | `terraform/namespaces.tf` | `revenda` (o `identidade` é do repositório de identidade; `gateway` e `observabilidade` ficam em `gateway.tf` e `observabilidade.tf`) |
 | `terraform/secrets.tf` | `random_password` → Secrets `revenda-db-credentials` (`DB_USER`, `DB_PASSWORD`, `DB_NAME`) e `revenda-webhook-secret` (`WEBHOOK_SECRET`) |
 | `terraform/postgres.tf` | StatefulSet + Service + PVC (`standard`, 1 Gi) para `revenda-db` |
-| `terraform/network_policies.tf` | Entrada no `revenda-db` só de `app=revenda-api`/`app=revenda-migracao`; `revenda-api-somente-gateway`: entrada na API (8000) só do Kong (ns `gateway`), do Prometheus (ns `observabilidade`) e do nó |
+| `terraform/network_policies.tf` | Entrada no `revenda-db` só de `app=revenda-api`/`app=revenda-migracao`/`app=revenda-saneamento`; `revenda-api-somente-gateway`: entrada na API (8000) só do Kong (ns `gateway`), do Prometheus (ns `observabilidade`) e do nó |
 | `terraform/gateway.tf` | Namespace `gateway`, Secret `kong-config` (template renderizado), Deployment `kong` (DB-less, 1 réplica, Admin API só em 127.0.0.1), Services `kong` (NodePort 30080) e `kong-status` (ClusterIP 8100) |
 | `terraform/observabilidade.tf` | Namespace `observabilidade`; Prometheus (ServiceAccount, Roles de leitura de pods em `revenda` e `gateway`, ConfigMap, Deployment com retenção de 2 dias em `emptyDir`, Service NodePort 30900); Grafana (`random_password` + Secret `grafana-admin`, ConfigMaps de provisionamento e painel, Deployment, Service NodePort 30300) |
 | `terraform/metrics_server.tf` | Chart `metrics-server` com `--kubelet-insecure-tls` |

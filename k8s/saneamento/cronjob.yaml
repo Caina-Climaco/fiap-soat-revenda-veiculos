@@ -1,0 +1,98 @@
+# Saneamento das reservas vencidas (ADR-009, docs/08-ci-cd-infra.md, secao 2.5). Mesma
+# imagem da API. A expiracao preguicosa aplicada pela API em cada escrita e leitura continua
+# sendo a garantia de correcao; este CronJob so antecipa o cancelamento das reservas que
+# ninguem consultou, para relatorios que leem o banco diretamente.
+# Comando: `python -m revenda.expirar` (src/revenda/expirar.py): cancela em lotes
+# (SANEAMENTO_LOTE) ate nao sobrar reserva vencida ou atingir SANEAMENTO_TETO por execucao;
+# o que sobrar fica para a proxima execucao. Os UPDATEs condicionais tornam o saneamento
+# seguro em paralelo com as requisicoes (ADR-008).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: revenda-saneamento
+  labels:
+    app: revenda-saneamento
+    app.kubernetes.io/name: revenda-saneamento
+    app.kubernetes.io/component: saneamento
+    app.kubernetes.io/part-of: revenda-veiculos
+spec:
+  schedule: "*/10 * * * *"
+  timeZone: Etc/UTC
+  concurrencyPolicy: Forbid
+  # Execucao perdida (controller fora do ar) e descartada se atrasar mais que isto:
+  # a proxima a cada 10 min faz o mesmo servico.
+  startingDeadlineSeconds: 300
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    metadata:
+      labels:
+        app.kubernetes.io/name: revenda-saneamento
+        app.kubernetes.io/component: saneamento
+        app.kubernetes.io/part-of: revenda-veiculos
+    spec:
+      backoffLimit: 2
+      activeDeadlineSeconds: 300
+      ttlSecondsAfterFinished: 600
+      template:
+        metadata:
+          labels:
+            # "app" e o rotulo usado pela NetworkPolicy do revenda-db (infra/terraform,
+            # resource revenda_db): ela aceita app=revenda-api, revenda-migracao e
+            # revenda-saneamento (ver docs/08-ci-cd-infra.md, secao 2.5).
+            app: revenda-saneamento
+            app.kubernetes.io/name: revenda-saneamento
+            app.kubernetes.io/component: saneamento
+            app.kubernetes.io/part-of: revenda-veiculos
+            revenda.io/acesso-db: "true"
+        spec:
+          restartPolicy: Never
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 10001
+            runAsGroup: 10001
+            fsGroup: 10001
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: saneamento
+              image: revenda-api:dev
+              imagePullPolicy: IfNotPresent
+              workingDir: /app
+              command: ["python", "-m", "revenda.expirar"]
+              env:
+                - name: DB_HOST
+                  value: revenda-db.revenda.svc.cluster.local
+                - name: DB_PORT
+                  value: "5432"
+                - name: SANEAMENTO_LOTE
+                  value: "100"
+                - name: SANEAMENTO_TETO
+                  value: "1000"
+                - name: LOG_LEVEL
+                  value: INFO
+              envFrom:
+                # DB_USER, DB_PASSWORD, DB_NAME
+                - secretRef:
+                    name: revenda-db-credentials
+              resources:
+                requests:
+                  cpu: 50m
+                  memory: 96Mi
+                limits:
+                  cpu: 250m
+                  memory: 192Mi
+              securityContext:
+                allowPrivilegeEscalation: false
+                readOnlyRootFilesystem: true
+                capabilities:
+                  drop: ["ALL"]
+              volumeMounts:
+                - name: tmp
+                  mountPath: /tmp
+          volumes:
+            - name: tmp
+              emptyDir:
+                sizeLimit: 64Mi

@@ -60,6 +60,7 @@ Restrições que pesam na escolha:
 ### Negativas
 - Mais um componente no caminho de toda requisição: um salto de rede a mais e mais um ponto de falha (uma réplica do Kong).
 - Contadores de *rate limiting* locais ao pod (`policy: local`): com mais réplicas do Kong, o limite efetivo se multiplica.
+- **No ambiente kind, o limite "por IP" é, na prática, global.** As rotas `api` e `compra` usam `limit_by: ip` (`infra/kong/kong.yml.tftpl`, linhas 30 a 34 e 40 a 44), mas o tráfego do host entra por `extraPortMappings` do kind (`infra/kind/cluster.yaml`, linhas 24 a 29: `127.0.0.1:8080` → porta 30080 do nó) e chega ao pod pelo Service NodePort `kong` (`infra/terraform/gateway.tf`, linhas 236 a 256), com SNAT do kube-proxy no caminho. O Kong enxerga para todos os clientes o mesmo endereço de origem (o IP do nó, ou o gateway da faixa de pods), e os contadores de 600/min e 60/min valem para o ambiente inteiro: um cliente consome a cota dos outros, e o k6 com 20 usuários virtuais recebe 429 em segundos (`tests/carga/README.md`). O mesmo vale para o e2e do CD, que entra por `revenda-control-plane:30080`. Para o ambiente de demonstração, o efeito é aceitável: o limite continua protegendo a API de inundação, só não distingue clientes.
 - O segredo do webhook passa a existir em dois Secrets (`revenda-webhook-secret` e `kong-config`); a rotação exige reaplicar o Terraform, que atualiza os dois juntos.
 - Quem já tinha o cluster precisa recriá-lo para as novas portas do monitoramento (o kind não acrescenta portas a um cluster existente).
 - Mudança de rota ou de limite exige novo deploy (Admin API somente leitura).
@@ -67,6 +68,7 @@ Restrições que pesam na escolha:
 ## Mitigações
 - Alerta `KongFora` e verificação do `/health/ready` através do Kong no CD; `kubectl -n gateway logs deployment/kong` no diagnóstico de falha do CD.
 - Limites em variáveis do Terraform (`kong_limite_geral_minuto`, `kong_limite_compra_minuto`); com mais réplicas, trocar para `policy: redis` ou `cluster`.
+- Limite por cliente real, em produção: o Kong fica atrás de um balanceador que preserva o IP de origem (`externalTrafficPolicy: Local`, protocolo PROXY ou `X-Forwarded-For`), com `real_ip_header`/`trusted_ips` do Kong (`KONG_REAL_IP_HEADER`, `KONG_TRUSTED_IPS`) apontando só para esse balanceador; ou, para as rotas autenticadas, `limit_by: consumer`/`credential` (exigiria que o Kong identificasse o chamador, por exemplo validando o JWT, o que hoje fica só na API). Para a carga local, o `tests/carga/README.md` descreve como elevar o limite temporariamente.
 - Alerta `KongRejeicoesNaBorda` para volume anormal de 401/403/429 ([12-observabilidade.md](../12-observabilidade.md)).
 - Procedimento de migração (recriar o cluster) no README, seção "Migração para o API Gateway e o monitoramento".
 

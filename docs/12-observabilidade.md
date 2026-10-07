@@ -92,7 +92,7 @@ Os números partem do RNF-10 ([03-requisitos.md](03-requisitos.md)), verificado 
 
 ## 12.4 Alertas
 
-As regras **ativas** estão em `infra/observabilidade/alertas.yml`, em três grupos (`revenda-api`, `negocio`, `gateway`), são avaliadas pelo Prometheus do cluster a cada 15 s e têm testes de unidade (`infra/observabilidade/alertas.test.yml`, `promtool test rules` no CI; ver [09-testes.md](09-testes.md), seção 9.5.11). As marcadas como *proposta* ainda não foram implementadas.
+As regras **ativas** estão em `infra/observabilidade/alertas.yml`, em três grupos (`revenda-api`, `negocio`, `gateway`), são avaliadas pelo Prometheus do cluster a cada 15 s e todas as oito têm testes de unidade com um caso que dispara e um que não dispara (`infra/observabilidade/alertas.test.yml`, `promtool test rules` no CI; ver [09-testes.md](09-testes.md), seção 9.5.11). As marcadas como *proposta* ainda não foram implementadas.
 
 | Alerta | Expressão | Por | Severidade | Ação |
 |---|---|---|---|---|

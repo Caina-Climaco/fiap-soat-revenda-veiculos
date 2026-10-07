@@ -1,0 +1,11 @@
+# CronJob de saneamento das reservas vencidas (python -m revenda.expirar), aplicado pelo
+# CD DEPOIS do rollout da API (ADR-009, segunda linha de defesa da expiracao preguicosa).
+# Autossuficiente como k8s/migracao: nao depende do ConfigMap de k8s/base.
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+namespace: revenda
+resources:
+  - cronjob.yaml
+images:
+  - name: revenda-api
+    newTag: dev

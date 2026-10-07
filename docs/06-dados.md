@@ -122,7 +122,7 @@ As constraints de coerência replicam no banco as invariantes do agregado `Venda
 | `vendas.vendas` | `ix_vendas_comprador_criada` | `(comprador_id, criada_em DESC)` | `GET /api/v1/vendas/minhas` |
 | `vendas.vendas` | `ix_vendas_status_criada` | `(status, criada_em DESC)` | `GET /api/v1/vendas?status=` (gestor) |
 | `vendas.vendas` | `ix_vendas_veiculo` | `(veiculo_id)` | Histórico de vendas por veículo (o índice parcial não cobre vendas canceladas) |
-| `vendas.vendas` | `ix_vendas_expiracao_pendente` | `(expira_em) WHERE status = 'AGUARDANDO_PAGAMENTO'` | Varredura preguiçosa de reservas vencidas na listagem da vitrine |
+| `vendas.vendas` | `ix_vendas_expiracao_pendente` | `(expira_em) WHERE status = 'AGUARDANDO_PAGAMENTO'` | Varredura de reservas vencidas: a preguiçosa, nas leituras da API, e a do CronJob de saneamento (`python -m revenda.expirar`, [ADR-009](adrs/ADR-009-expiracao-preguicosa.md)) |
 
 Comportamento sob concorrência (detalhado no [ADR-008](adrs/ADR-008-concorrencia-update-condicional.md)): a reserva é um `UPDATE catalogo.veiculos SET status = 'RESERVADO', versao = versao + 1 WHERE id = :id AND status = 'A_VENDA'`. No `READ COMMITTED`, a segunda transação concorrente espera o *lock* de linha da primeira e, após o commit dela, reavalia o `WHERE` contra a versão nova da linha: o status já é `RESERVADO`, então 0 linhas são afetadas e a API responde 409. O índice único parcial é a segunda barreira: uma segunda venda ativa para o mesmo veículo viola `ux_vendas_veiculo_ativa` (SQLSTATE `23505`), mapeado para 409.
 
@@ -142,6 +142,8 @@ Comportamento sob concorrência (detalhado no [ADR-008](adrs/ADR-008-concorrenci
 4. Só então o Deployment é atualizado e o CD aguarda `kubectl rollout status`.
 
 Executar a migração em um Job único, e não no *startup* de cada pod, evita a corrida entre réplicas (duas réplicas tentando aplicar a mesma DDL) e mantém o pod da API sem privilégios de DDL no seu ciclo de vida normal. O grupo de concorrência `deploy-local` do CD garante que dois Jobs de migração nunca rodem ao mesmo tempo.
+
+Além da migração, um segundo processo em lote toca o banco: o CronJob `revenda-saneamento` (`k8s/saneamento/`, a cada 10 min, `python -m revenda.expirar`), que cancela as reservas vencidas que nenhuma requisição consultou, com os mesmos UPDATEs condicionais da API ([ADR-008](adrs/ADR-008-concorrencia-update-condicional.md)). Ele só faz DML (não altera o schema) e existe porque o status persistido pode ficar atrasado em relação ao TTL até alguém ler ou escrever a venda ([ADR-009](adrs/ADR-009-expiracao-preguicosa.md)): quem lê `vendas.vendas` diretamente (relatórios, consultas ad hoc) ainda deve tratar `status = 'AGUARDANDO_PAGAMENTO' AND expira_em <= now()` como reserva vencida, pois entre duas execuções do CronJob (ou acima do teto de 1000 cancelamentos por execução) essas linhas podem existir. Detalhes em [08-ci-cd-infra.md](08-ci-cd-infra.md), seção 2.5.
 
 ### 5.3 Regras para migrações seguras
 

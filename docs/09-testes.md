@@ -107,7 +107,7 @@ Observações:
 | BDD-05 | Gestor tentando comprar (403) | integração e e2e | RF-04, RN-05 |
 | BDD-06 | Edição de veículo reservado (409) | unidade e integração | RF-02, RN-02 |
 | BDD-07 | Webhook com segredo inválido | integração (recusa pela API) e e2e (recusa pelo Kong) | RNF-03, RN-19 |
-| BDD-08 | Reserva expirada | unidade e integração (relógio fixo) | RF-15, RN-04, RN-14 |
+| BDD-08 | Reserva expirada | unidade e integração (relógio fixo); saneamento pelo CronJob em `unit/test_expirar.py` e `integration/test_expirar.py` | RF-15, RN-04, RN-14 |
 | BDD-09 | Listagens ordenadas por preço | integração e e2e | RF-06, RF-07, RN-17 |
 
 ### 9.5.1 BDD-01 — Compra com sucesso e efetivação
@@ -335,8 +335,14 @@ Com o gateway (CD, `E2E_GATEWAY=1`), o BDD-07 no e2e verifica que a recusa vem *
 |---|---|
 | `RevendaApiFora` | Não dispara com 1 min sem coleta; dispara depois de 2 min (`for: 2m`), com os rótulos e anotações esperados |
 | `RevendaErros5xxAltos` | Dispara com 5% de respostas 5xx; não dispara com tráfego saudável |
-| `KongFora` | Não dispara com o Kong sendo coletado |
+| `RevendaListagensLentas` | Dispara com p95 ≈ 475 ms nas listagens (histograma cumulativo: metade das requisições até 250 ms, o resto até 500 ms), só depois dos 10 min de `for`; não dispara com p95 ≈ 175 ms nem quando só `/api/v1/vendas` (fora da expressão `rota=~`) está lenta |
+| `RevendaHpaNoMaximo` | Dispara com 5 réplicas coletadas (`up == 1`) por mais de 15 min; não dispara com 5 pods dos quais um está sem coleta (4 ativas; nesse caso é `RevendaApiFora` que dispara, para o pod sem coleta) |
+| `RevendaWebhookRecusado` | Dispara com 0,5 respostas 401/s no webhook (limite: 0,1/s por 5 min); não dispara com 0,05/s no webhook nem com 401 frequente em outra rota |
+| `RevendaRecusasDePagamentoAltas` | Dispara com 50% das compras da última hora com `PAGAMENTO_RECUSADO`, só depois dos 30 min de `for`; não dispara com 10%, mesmo com muitos cancelamentos por outro motivo (`DESISTENCIA`) |
+| `KongFora` | Não dispara com 1 min sem coleta do Kong; dispara depois de 2 min (`for: 2m`), sem afetar `RevendaApiFora` |
 | `KongRejeicoesNaBorda` | Não dispara com tráfego saudável; dispara com 1 rejeição 401 por segundo no webhook (limite: 0,5/s por 5 min) |
+
+Todas as 8 regras ativas de `alertas.yml` têm pelo menos um caso que dispara e um que não dispara.
 
 No CD, a etapa "Monitoramento" confere que as regras foram carregadas no Prometheus do cluster (pelo menos 3 grupos) e que a API e o Kong estão sendo coletados.
 

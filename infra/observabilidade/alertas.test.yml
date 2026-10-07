@@ -90,3 +90,219 @@ tests:
             exp_annotations:
               resumo: "Muitas requisicoes barradas no gateway (credencial invalida ou limite de taxa)"
               acao: "Conferir origem no log do Kong; possivel abuso"
+
+  # p95 das listagens acima de 300 ms por mais de 10 minutos -> RevendaListagensLentas
+  # Histograma cumulativo: metade das requisicoes ate 250 ms, o resto ate 500 ms
+  # (p95 interpolado ~475 ms). A rota de vendas e ignorada pela expressao (rota=~).
+  - interval: 1m
+    input_series:
+      - series: 'revenda_http_requisicao_duracao_segundos_bucket{metodo="GET", rota="/api/v1/veiculos/a-venda", status="200", le="0.1"}'
+        values: "0+10x20"
+      - series: 'revenda_http_requisicao_duracao_segundos_bucket{metodo="GET", rota="/api/v1/veiculos/a-venda", status="200", le="0.25"}'
+        values: "0+50x20"
+      - series: 'revenda_http_requisicao_duracao_segundos_bucket{metodo="GET", rota="/api/v1/veiculos/a-venda", status="200", le="0.5"}'
+        values: "0+100x20"
+      - series: 'revenda_http_requisicao_duracao_segundos_bucket{metodo="GET", rota="/api/v1/veiculos/a-venda", status="200", le="+Inf"}'
+        values: "0+100x20"
+      - series: 'up{job="revenda-api", pod="revenda-api-1"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 8m
+        alertname: RevendaListagensLentas
+        exp_alerts: []
+      - eval_time: 18m
+        alertname: RevendaListagensLentas
+        exp_alerts:
+          - exp_labels:
+              severidade: alerta
+            exp_annotations:
+              resumo: "p95 das listagens acima de 300 ms (SLO)"
+              acao: "Ver saturacao (CPU, HPA no maximo) e o banco"
+
+  # Listagens rapidas (90% ate 100 ms, p95 ~175 ms); so a rota de vendas esta lenta,
+  # e ela nao entra no SLO das listagens -> nenhum alerta
+  - interval: 1m
+    input_series:
+      - series: 'revenda_http_requisicao_duracao_segundos_bucket{metodo="GET", rota="/api/v1/veiculos/vendidos", status="200", le="0.1"}'
+        values: "0+90x20"
+      - series: 'revenda_http_requisicao_duracao_segundos_bucket{metodo="GET", rota="/api/v1/veiculos/vendidos", status="200", le="0.25"}'
+        values: "0+100x20"
+      - series: 'revenda_http_requisicao_duracao_segundos_bucket{metodo="GET", rota="/api/v1/veiculos/vendidos", status="200", le="0.5"}'
+        values: "0+100x20"
+      - series: 'revenda_http_requisicao_duracao_segundos_bucket{metodo="GET", rota="/api/v1/veiculos/vendidos", status="200", le="+Inf"}'
+        values: "0+100x20"
+      - series: 'revenda_http_requisicao_duracao_segundos_bucket{metodo="POST", rota="/api/v1/vendas", status="201", le="0.5"}'
+        values: "0+0x20"
+      - series: 'revenda_http_requisicao_duracao_segundos_bucket{metodo="POST", rota="/api/v1/vendas", status="201", le="+Inf"}'
+        values: "0+100x20"
+      - series: 'up{job="revenda-api", pod="revenda-api-1"}'
+        values: "1x20"
+    alert_rule_test:
+      - eval_time: 18m
+        alertname: RevendaListagensLentas
+        exp_alerts: []
+
+  # 5 replicas da API (maxReplicas do HPA) por mais de 15 minutos -> RevendaHpaNoMaximo
+  - interval: 1m
+    input_series:
+      - series: 'up{job="revenda-api", pod="revenda-api-1"}'
+        values: "1x25"
+      - series: 'up{job="revenda-api", pod="revenda-api-2"}'
+        values: "1x25"
+      - series: 'up{job="revenda-api", pod="revenda-api-3"}'
+        values: "1x25"
+      - series: 'up{job="revenda-api", pod="revenda-api-4"}'
+        values: "1x25"
+      - series: 'up{job="revenda-api", pod="revenda-api-5"}'
+        values: "1x25"
+      - series: 'up{job="kong", pod="kong-1"}'
+        values: "1x25"
+    alert_rule_test:
+      - eval_time: 10m
+        alertname: RevendaHpaNoMaximo
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: RevendaHpaNoMaximo
+        exp_alerts:
+          - exp_labels:
+              severidade: alerta
+            exp_annotations:
+              resumo: "API rodando com o maximo de replicas do HPA (5)"
+              acao: "Avaliar maxReplicas, requests e consultas lentas"
+
+  # 5 pods, mas um deles sem coleta (up=0): so 4 replicas ativas -> HPA nao alerta
+  # (a expressao conta apenas up == 1); o pod sem coleta dispara RevendaApiFora.
+  - interval: 1m
+    input_series:
+      - series: 'up{job="revenda-api", pod="revenda-api-1"}'
+        values: "1x25"
+      - series: 'up{job="revenda-api", pod="revenda-api-2"}'
+        values: "1x25"
+      - series: 'up{job="revenda-api", pod="revenda-api-3"}'
+        values: "1x25"
+      - series: 'up{job="revenda-api", pod="revenda-api-4"}'
+        values: "1x25"
+      - series: 'up{job="revenda-api", pod="revenda-api-5"}'
+        values: "0x25"
+      - series: 'up{job="kong", pod="kong-1"}'
+        values: "1x25"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RevendaHpaNoMaximo
+        exp_alerts: []
+      - eval_time: 20m
+        alertname: RevendaApiFora
+        exp_alerts:
+          - exp_labels:
+              severidade: critica
+              job: revenda-api
+              pod: revenda-api-5
+            exp_annotations:
+              resumo: "revenda-api sem coleta de metricas"
+              acao: "Ver pods, eventos e kubectl -n revenda rollout status deployment/revenda-api"
+
+  # Webhook de pagamento recusado (401) a 0,5/s por mais de 5 minutos -> RevendaWebhookRecusado
+  - interval: 1m
+    input_series:
+      - series: 'revenda_http_requisicoes_total{metodo="POST", rota="/api/v1/pagamentos/webhook", status="401"}'
+        values: "0+30x15"
+      - series: 'revenda_http_requisicoes_total{metodo="POST", rota="/api/v1/pagamentos/webhook", status="200"}'
+        values: "0+5x15"
+      - series: 'up{job="revenda-api", pod="revenda-api-1"}'
+        values: "1x15"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: RevendaWebhookRecusado
+        exp_alerts: []
+      - eval_time: 12m
+        alertname: RevendaWebhookRecusado
+        exp_alerts:
+          - exp_labels:
+              severidade: alerta
+            exp_annotations:
+              resumo: "Webhook de pagamento recusado com frequencia na API"
+              acao: "Possivel tentativa de forjar pagamento; conferir origem e rotacionar o segredo"
+
+  # 401 esporadico no webhook (0,05/s) e 401 frequente em outra rota -> nenhum alerta
+  - interval: 1m
+    input_series:
+      - series: 'revenda_http_requisicoes_total{metodo="POST", rota="/api/v1/pagamentos/webhook", status="401"}'
+        values: "0+3x15"
+      - series: 'revenda_http_requisicoes_total{metodo="POST", rota="/api/v1/pagamentos/webhook", status="200"}'
+        values: "0+50x15"
+      - series: 'revenda_http_requisicoes_total{metodo="POST", rota="/api/v1/veiculos", status="401"}'
+        values: "0+30x15"
+      - series: 'up{job="revenda-api", pod="revenda-api-1"}'
+        values: "1x15"
+    alert_rule_test:
+      - eval_time: 12m
+        alertname: RevendaWebhookRecusado
+        exp_alerts: []
+
+  # Metade das compras da ultima hora com pagamento recusado, por mais de 30 minutos
+  # -> RevendaRecusasDePagamentoAltas (grupo negocio)
+  - interval: 1m
+    input_series:
+      - series: 'revenda_vendas_iniciadas_total'
+        values: "0+2x90"
+      - series: 'revenda_vendas_canceladas_total{motivo="PAGAMENTO_RECUSADO"}'
+        values: "0+1x90"
+      - series: 'revenda_vendas_efetivadas_total'
+        values: "0+1x90"
+      - series: 'up{job="revenda-api", pod="revenda-api-1"}'
+        values: "1x90"
+    alert_rule_test:
+      - eval_time: 20m
+        alertname: RevendaRecusasDePagamentoAltas
+        exp_alerts: []
+      - eval_time: 75m
+        alertname: RevendaRecusasDePagamentoAltas
+        exp_alerts:
+          - exp_labels:
+              severidade: informativa
+            exp_annotations:
+              resumo: "Mais de 30% das compras com pagamento recusado"
+              acao: "Falar com o gateway de pagamento"
+
+  # 10% de recusas; cancelamentos por outro motivo (desistencia) nao contam -> nenhum alerta
+  - interval: 1m
+    input_series:
+      - series: 'revenda_vendas_iniciadas_total'
+        values: "0+10x90"
+      - series: 'revenda_vendas_canceladas_total{motivo="PAGAMENTO_RECUSADO"}'
+        values: "0+1x90"
+      - series: 'revenda_vendas_canceladas_total{motivo="DESISTENCIA"}'
+        values: "0+5x90"
+      - series: 'revenda_vendas_efetivadas_total'
+        values: "0+4x90"
+      - series: 'up{job="revenda-api", pod="revenda-api-1"}'
+        values: "1x90"
+    alert_rule_test:
+      - eval_time: 75m
+        alertname: RevendaRecusasDePagamentoAltas
+        exp_alerts: []
+
+  # Kong sem coleta por mais de 2 minutos -> KongFora (a API continua coletada)
+  - interval: 1m
+    input_series:
+      - series: 'up{job="kong", pod="kong-1"}'
+        values: "1 1 0 0 0 0"
+      - series: 'up{job="revenda-api", pod="revenda-api-1"}'
+        values: "1 1 1 1 1 1"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: KongFora
+        exp_alerts: []
+      - eval_time: 5m
+        alertname: KongFora
+        exp_alerts:
+          - exp_labels:
+              severidade: critica
+              job: kong
+              pod: kong-1
+            exp_annotations:
+              resumo: "API Gateway (Kong) sem coleta de metricas"
+              acao: "kubectl -n gateway get pods; kubectl -n gateway logs deployment/kong"
+      - eval_time: 5m
+        alertname: RevendaApiFora
+        exp_alerts: []

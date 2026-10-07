@@ -58,7 +58,7 @@ jobs:
       TF_INPUT: "0"
     steps:
       - name: Checkout
-        uses: actions/checkout@v7
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ inputs.ref || github.sha }}
           clean: true
@@ -269,6 +269,31 @@ jobs:
             echo "OK: $url"
           }
           esperar "${E2E_API_URL}/health/ready" 180
+
+      # Segunda linha de defesa da expiracao preguicosa (ADR-009): o CronJob recebe a mesma
+      # imagem do rollout e uma execucao de fumaca prova, a cada deploy, que o comando sobe.
+      - name: Saneamento das reservas vencidas (CronJob revenda-saneamento)
+        run: |
+          set -euo pipefail
+          manifesto="${WORK_TMP}/saneamento.yaml"
+          kubectl kustomize k8s/saneamento > "$manifesto"
+          sed -E -i "s#^([[:space:]]*-?[[:space:]]*image:[[:space:]]*[\"']?)revenda-api(:[A-Za-z0-9._-]+)?([\"']?)[[:space:]]*\$#\1revenda-api:${SHA}\3#" "$manifesto"
+          grep -q "revenda-api:${SHA}" "$manifesto" || { echo "::error::Imagem revenda-api nao encontrada no manifesto renderizado de k8s/saneamento"; exit 1; }
+          kubectl apply -n "$NS_APP" -f "$manifesto"
+          atual="$(kubectl -n "$NS_APP" get cronjob revenda-saneamento -o jsonpath='{.spec.jobTemplate.spec.template.spec.containers[?(@.name=="saneamento")].image}')"
+          [ "$atual" = "$IMAGEM" ] || { echo "::error::CronJob com imagem inesperada: '$atual' (esperada: $IMAGEM)"; exit 1; }
+          job="revenda-saneamento-cd-${SHA:0:12}"
+          kubectl -n "$NS_APP" delete job "$job" --ignore-not-found --wait=true
+          kubectl -n "$NS_APP" create job "$job" --from=cronjob/revenda-saneamento
+          if ! kubectl -n "$NS_APP" wait --for=condition=complete --timeout=120s "job/${job}"; then
+            echo "::error::Saneamento nao concluiu (job ${job} sem sucesso)."
+            kubectl -n "$NS_APP" describe job "$job" || true
+            kubectl -n "$NS_APP" logs "job/${job}" --all-containers --tail=100 || true
+            exit 1
+          fi
+          kubectl -n "$NS_APP" logs "job/${job}" --all-containers --tail=20 || true
+          kubectl -n "$NS_APP" delete job "$job" --ignore-not-found --wait=false
+          kubectl -n "$NS_APP" get cronjob revenda-saneamento
 
       # O Kong ja respondeu ao /health/ready acima; aqui se confere que o monitoramento
       # enxerga a API e o gateway e que o painel e os alertas foram provisionados (ADR-016).

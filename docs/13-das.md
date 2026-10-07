@@ -66,10 +66,10 @@ Fora do escopo: front-end, pagamento real, nota fiscal, nuvem pública, Serverle
 | Risco | Mitigação | Referência |
 |---|---|---|
 | Keycloak consome muita memória no PC | *Limit* de 1536Mi, cluster de um nó | R-02 |
-| Runner self-hosted em repositório público | CD só na `main` (dispatch validado), fork PRs com aprovação, CI de PR só no runner hospedado | R-09, [ADR-006](adrs/ADR-006-ci-hospedado-cd-self-hosted.md) |
+| Runner self-hosted em repositório público (socket do Docker e `sudo` no container: quem executa um job controla o Docker Desktop do PC) | CD só na `main` (dispatch validado como ancestral da `main`), fork PRs com aprovação, CI de PR só no runner hospedado, `main` protegida com checks obrigatórios, segredos lidos do cluster e mascarados; em produção, runner efêmero sem socket do Docker e repositório privado ou environment com aprovação | R-09, [ADR-006](adrs/ADR-006-ci-hospedado-cd-self-hosted.md), seção "Risco: runner self-hosted em repositório público" |
 | API implantada sem a identidade no ar (dois repositórios, ordem de implantação) | CD e script 04 da API conferem o realm `revenda` antes do `terraform apply` e falham cedo; contrato documentado no repositório de identidade | R-14, [ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md) |
 | PC desligado impede o CD | Runner em container com reinício automático; `workflow_dispatch` | R-01 |
-| Abuso das rotas públicas e do webhook | **Mitigado**: Kong com *rate limiting* por IP, key-auth + ACL no webhook, payload ≤ 1 MB; limites de paginação e HPA | R-12, [ADR-015](adrs/ADR-015-api-gateway-kong.md) |
+| Abuso das rotas públicas e do webhook | **Mitigado**: Kong com *rate limiting* por IP, key-auth + ACL no webhook, payload ≤ 1 MB; limites de paginação e HPA. Ressalva: no kind o tráfego chega ao Kong com SNAT do NodePort, e o limite "por IP" vale para o ambiente inteiro (um cliente consome a cota dos outros) | R-12, [ADR-015](adrs/ADR-015-api-gateway-kong.md) |
 | Degradação não percebida | **Mitigado**: Prometheus e Grafana com alertas ativos; resta a falta de notificação (sem Alertmanager) | R-13, [ADR-016](adrs/ADR-016-prometheus-grafana.md) |
 | Gateway como ponto único de falha (uma réplica) | Alerta `KongFora`; CD confere a API pelo Kong a cada deploy | [ADR-015](adrs/ADR-015-api-gateway-kong.md) |
 | Memória do PC com Kong, Prometheus e Grafana | *Limits* definidos (512Mi, 768Mi, 512Mi); soma do ambiente ≈ 5,7 GiB (RNF-17) | R-02, [03](03-requisitos.md#33-requisitos-não-funcionais) |
@@ -90,7 +90,8 @@ Lista completa em [10-plano-execucao.md, seção 10.5](10-plano-execucao.md#105-
 
 ## 13.8 Pendências e evoluções
 
-- Limite de reservas ativas por comprador; *rate limiting* compartilhado entre réplicas do Kong (`policy: redis`) e TLS no gateway ([ADR-015](adrs/ADR-015-api-gateway-kong.md)).
+- Limite de reservas ativas por comprador; *rate limiting* compartilhado entre réplicas do Kong (`policy: redis`), limite por cliente real (IP de origem preservado por um balanceador com `real_ip_header`/`trusted_ips`, ou `limit_by: consumer`) e TLS no gateway ([ADR-015](adrs/ADR-015-api-gateway-kong.md)).
+- Identificador civil do veículo (placa, chassi, RENAVAM) e estado "retirado do anúncio", hoje decisões conscientes de não ter ([02-modelagem-ddd.md](02-modelagem-ddd.md), RN-20 e RN-21).
 - Alertmanager com notificação, armazenamento persistente das métricas e APM com traços ([ADR-016](adrs/ADR-016-prometheus-grafana.md), [12-observabilidade.md](12-observabilidade.md)).
 - Simulador do gateway de pagamento como função Serverless ([ADR-013](adrs/ADR-013-sem-api-gateway-e-serverless.md)).
 - Produção: TLS, Keycloak em modo `start`, desativar os clients `revenda-e2e` e `revenda-e2e-admin`, definir `OIDC_AZP_PERMITIDOS` ([ADR-001](adrs/ADR-001-keycloak-identidade.md)).
