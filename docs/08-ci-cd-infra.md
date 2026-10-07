@@ -1,4 +1,4 @@
-# 08 — CI/CD e infraestrutura
+# 08. CI/CD e infraestrutura
 
 Este documento descreve como o ambiente da API é criado e como o código chega a ele: a infraestrutura como código (cluster kind criado pela CLI `kind`; namespace `revenda`, banco da API, segredos, API Gateway Kong e Prometheus/Grafana pelo Terraform), os manifestos Kubernetes da aplicação com kustomize, os pipelines de integração e entrega contínuas no GitHub Actions, as regras de governança do repositório, a segurança do runner self-hosted e o procedimento de rollback. A premissa do enunciado é que toda mudança, de implantação ou de código, passa por Pull Request e pipeline. As decisões estão nos [ADR-005](adrs/ADR-005-kind-terraform-nodeport.md), [ADR-006](adrs/ADR-006-ci-hospedado-cd-self-hosted.md), [ADR-010](adrs/ADR-010-kind-load-sem-registry.md), [ADR-011](adrs/ADR-011-segredos-terraform.md), [ADR-014](adrs/ADR-014-identidade-em-repositorio-proprio.md), [ADR-015](adrs/ADR-015-api-gateway-kong.md) e [ADR-016](adrs/ADR-016-prometheus-grafana.md).
 
@@ -210,9 +210,9 @@ O CD da API não implanta nem altera o Keycloak: ele só confere que o realm est
 
 | Passo | O que faz | Critério de sucesso |
 |---|---|---|
-| 1. Checkout | `actions/checkout` do SHA do push ou do `ref` informado | — |
+| 1. Checkout | `actions/checkout` do SHA do push ou do `ref` informado | |
 | 2. Validação da `ref` (só `workflow_dispatch`) | Busca `origin/main` e recusa o deploy se o commit pedido não for ancestral dela (`git merge-base --is-ancestor`) | Só commits que já passaram pela `main` são implantados |
-| 3. Contexto | Calcula `SHA` e `IMAGEM=revenda-api:<sha>`; confere o bind mount do state e as ferramentas no PATH | — |
+| 3. Contexto | Calcula `SHA` e `IMAGEM=revenda-api:<sha>`; confere o bind mount do state e as ferramentas no PATH | |
 | 4. Cluster kind | Se `kind get clusters` não lista `revenda`: `kind create cluster --config infra/kind/cluster.yaml --wait 120s`; depois `kind export kubeconfig --internal --name revenda` | Contexto `kind-revenda` acessível de dentro do container |
 | 5. Serviço de identidade publicado | `curl` em `http://revenda-control-plane:30180/realms/revenda/.well-known/openid-configuration`, até 24 tentativas a cada 5 s; se não responder, falha com a mensagem "Implante antes o serviço de identidade (repositório fiap-soat-revenda-identidade)" | Realm `revenda` respondendo, antes de qualquer alteração na API |
 | 6. Terraform | `terraform init -reconfigure -backend-config="path=/revenda-state/revenda-api.tfstate"`; um único `terraform apply -auto-approve` (namespace `revenda`, segredos, `revenda-db`, NetworkPolicies, metrics-server, Kong no ns `gateway`, Prometheus e Grafana no ns `observabilidade`) | Plataforma da API convergida (idempotente) |
@@ -224,8 +224,8 @@ O CD da API não implanta nem altera o Keycloak: ele só confere que o realm est
 | 12. Saneamento | `kubectl kustomize k8s/saneamento` + `sed` da imagem + `kubectl apply -f` (CronJob é declarativo: o `apply` atualiza no lugar, sem `delete`); confere a imagem do container `saneamento`; dispara uma execução de fumaça (`kubectl create job revenda-saneamento-cd-<sha> --from=cronjob/revenda-saneamento`) e espera `complete` (até 120 s) | CronJob com a imagem do SHA e uma execução concluída com a imagem nova (seção 2.5); depois do rollout, fora do caminho crítico |
 | 13. Monitoramento | Consulta a API HTTP do Prometheus: `count(up{job="revenda-api"} == 1)` e `count(up{job="kong"} == 1)` maiores que zero (até 24 tentativas a cada 5 s); `/api/v1/rules` com pelo menos 3 grupos; `GET /api/health` do Grafana e o painel `revenda-visao-geral` pela API do Grafana | Coleta da API e do Kong ativa, alertas carregados, painel provisionado ([ADR-016](adrs/ADR-016-prometheus-grafana.md)) |
 | 14. e2e | Lê dos Secrets, via `kubectl`, o segredo do webhook (`revenda/revenda-webhook-secret`) e, do contrato com a identidade, a senha do gestor (`identidade/keycloak-gestor`) e o client técnico `revenda-e2e-admin` (`identidade/keycloak-e2e`: `E2E_ADMIN_CLIENT_ID` e `E2E_ADMIN_CLIENT_SECRET`), todos mascarados com `::add-mask::`; o admin do realm `master` não é usado; cria um venv com `tests/e2e/requirements.txt`; `pytest tests/e2e -m e2e` com `E2E_EXIGIR=1`, `E2E_GATEWAY=1` (os testes do gateway são obrigatórios) e relatório JUnit | Fluxo início-a-fim verde, pelo Kong ([09-testes.md](09-testes.md)) |
-| 15. Diagnóstico (em falha) | Pods de todos os namespaces, eventos, logs da API, logs do Kong (`kubectl -n gateway logs deployment/kong`) e pods do ns `observabilidade` (os logs do Keycloak são diagnosticados no repositório de identidade) | — |
-| 16. Resumo | `$GITHUB_STEP_SUMMARY`: SHA, imagem, réplicas prontas, resultado e contagem do e2e, URLs locais (API pelo gateway, Grafana, Prometheus, Keycloak) | — |
+| 15. Diagnóstico (em falha) | Pods de todos os namespaces, eventos, logs da API, logs do Kong (`kubectl -n gateway logs deployment/kong`) e pods do ns `observabilidade` (os logs do Keycloak são diagnosticados no repositório de identidade) | |
+| 16. Resumo | `$GITHUB_STEP_SUMMARY`: SHA, imagem, réplicas prontas, resultado e contagem do e2e, URLs locais (API pelo gateway, Grafana, Prometheus, Keycloak) | |
 
 Se o e2e falhar após o rollout, o job falha (deploy marcado como vermelho) e o autor executa o rollback da seção 6. O rollback não é automático, para preservar o estado para diagnóstico.
 

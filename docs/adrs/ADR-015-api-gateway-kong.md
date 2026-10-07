@@ -37,8 +37,8 @@ Restrições que pesam na escolha:
 | `api` | `/api/v1` (todos os métodos) | `rate-limiting` 600/min por IP |
 | `compra` | `POST /api/v1/vendas` | `rate-limiting` 60/min por IP |
 | `webhook-pagamento` | `POST /api/v1/pagamentos/webhook` | `key-auth` (header `X-Webhook-Secret`) + `acl` só para o consumer `gateway-pagamento` |
-| `documentacao` | `GET /docs`, `GET /openapi.json` | — |
-| `saude` | `GET /health/*` | — |
+| `documentacao` | `GET /docs`, `GET /openapi.json` | |
+| `saude` | `GET /health/*` | |
 
 - **Plugins globais**: `correlation-id` (`X-Request-ID`; gera UUID quando o cliente não manda e devolve na resposta), `request-size-limiting` (1 MB) e `prometheus` (métricas no *status listener* `:8100`, coletadas pelo Prometheus do cluster).
 - **`/metrics` da API não tem rota no Kong**: pelo host responde 404 do próprio gateway; só o Prometheus lê, dentro do cluster.
@@ -75,5 +75,5 @@ Restrições que pesam na escolha:
 ## Referências
 - [07-seguranca-lgpd.md](../07-seguranca-lgpd.md), seção 3.6 (proteção de borda)
 - [08-ci-cd-infra.md](../08-ci-cd-infra.md) (recursos Terraform e etapas do CI/CD)
-- [Kong Gateway — DB-less and declarative configuration](https://docs.konghq.com/gateway/latest/production/deployment-topologies/db-less-and-declarative-config/)
-- [Kong — Rate Limiting plugin](https://docs.konghq.com/hub/kong-inc/rate-limiting/), [Key Authentication](https://docs.konghq.com/hub/kong-inc/key-auth/), [ACL](https://docs.konghq.com/hub/kong-inc/acl/), [Correlation ID](https://docs.konghq.com/hub/kong-inc/correlation-id/), [Prometheus](https://docs.konghq.com/hub/kong-inc/prometheus/)
+- [Kong Gateway: DB-less and declarative configuration](https://docs.konghq.com/gateway/latest/production/deployment-topologies/db-less-and-declarative-config/)
+- [Kong: Rate Limiting plugin](https://docs.konghq.com/hub/kong-inc/rate-limiting/), [Key Authentication](https://docs.konghq.com/hub/kong-inc/key-auth/), [ACL](https://docs.konghq.com/hub/kong-inc/acl/), [Correlation ID](https://docs.konghq.com/hub/kong-inc/correlation-id/), [Prometheus](https://docs.konghq.com/hub/kong-inc/prometheus/)

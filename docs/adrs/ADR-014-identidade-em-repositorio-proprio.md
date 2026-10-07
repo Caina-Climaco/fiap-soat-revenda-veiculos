@@ -17,7 +17,7 @@ Com isso, uma mudança na API podia reimplantar o Keycloak, quem tinha acesso ao
 
 ## Decisão
 
-O serviço de identidade passa a ser **outro repositório**: [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade). Lá ficam o realm, o Terraform do namespace `identidade` (Keycloak 26.7.1, `keycloak-db`, segredos, NetworkPolicy do `keycloak-db`, Job `keycloak-reconciliar`), o state próprio (`%USERPROFILE%\.revenda\identidade.tfstate`), o CI próprio (checks `qualidade`, `realm` — que sobe um Keycloak real via docker compose e testa o contrato — e `infra`), o CD próprio num runner self-hosted próprio (container `revenda-runner-identidade`), os scripts e o docker compose do Keycloak.
+O serviço de identidade passa a ser **outro repositório**: [fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade). Lá ficam o realm, o Terraform do namespace `identidade` (Keycloak 26.7.1, `keycloak-db`, segredos, NetworkPolicy do `keycloak-db`, Job `keycloak-reconciliar`), o state próprio (`%USERPROFILE%\.revenda\identidade.tfstate`), o CI próprio (checks `qualidade`, `realm`, que sobe um Keycloak real via docker compose e testa o contrato, e `infra`), o CD próprio num runner self-hosted próprio (container `revenda-runner-identidade`), os scripts e o docker compose do Keycloak.
 
 Neste repositório fica só a API: código, migrações, manifestos `k8s/`, Terraform do namespace `revenda` (`revenda-db`, Secrets `revenda-db-credentials` e `revenda-webhook-secret`, NetworkPolicy do `revenda-db`, metrics-server) com state `%USERPROFILE%\.revenda\revenda-api.tfstate`, CI (`qualidade`, `testes`, `imagem`, `infra`) e CD.
 

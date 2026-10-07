@@ -2,7 +2,7 @@
 
 Este documento registra a modelagem do domínio da revenda de veículos: o fluxo de compra contado em Domain Storytelling, o Event Storming, a linguagem ubíqua, os subdomínios e contextos delimitados, os agregados com suas invariantes, as máquinas de estado e as regras de negócio descobertas que não constavam do enunciado. É a base dos requisitos ([03-requisitos.md](03-requisitos.md)) e da estrutura do código (`src/revenda/catalogo` e `src/revenda/vendas`).
 
-## 2.1 Domain Storytelling — fluxo de compra
+## 2.1 Domain Storytelling: fluxo de compra
 
 Notação: cada passo segue o padrão **ator → atividade → objeto de trabalho** (com quem/onde). A história cobre o caminho feliz e, em seguida, as variantes.
 
@@ -137,19 +137,19 @@ flowchart LR
 
 | Evento | Gatilho (ator / sistema) | Comando | Agregado | Política disparada |
 |---|---|---|---|---|
-| `VeiculoCadastrado` | Gestor da loja | Cadastrar veículo (`POST /api/v1/veiculos`) | Veiculo | — (atualiza *Veículos à venda*) |
-| `VeiculoEditado` | Gestor da loja | Editar veículo (`PATCH /api/v1/veiculos/{id}`) | Veiculo | — (atualiza *Veículos à venda*) |
-| `ClienteCadastrado` | Visitante anônimo | Registrar-se (tela do realm `revenda`) | — (Keycloak) | Atribuir papel `cliente` (default role do realm) |
+| `VeiculoCadastrado` | Gestor da loja | Cadastrar veículo (`POST /api/v1/veiculos`) | Veiculo | Nenhuma (atualiza *Veículos à venda*) |
+| `VeiculoEditado` | Gestor da loja | Editar veículo (`PATCH /api/v1/veiculos/{id}`) | Veiculo | Nenhuma (atualiza *Veículos à venda*) |
+| `ClienteCadastrado` | Visitante anônimo | Registrar-se (tela do realm `revenda`) | Nenhum (Keycloak) | Atribuir papel `cliente` (default role do realm) |
 | `CompraIniciada` | Cliente | Iniciar compra (`POST /api/v1/vendas`) | Venda | Reservar veículo e congelar preço |
-| `VeiculoReservado` | Política de reserva | Reservar veículo (`CatalogoPort.reservar`) | Veiculo | — (sai de *Veículos à venda*) |
+| `VeiculoReservado` | Política de reserva | Reservar veículo (`CatalogoPort.reservar`) | Veiculo | Nenhuma (sai de *Veículos à venda*) |
 | `PagamentoAprovado` | Gateway de pagamento | Registrar resultado do pagamento (`POST /api/v1/pagamentos/webhook`, `APROVADO`) | Venda | Efetivar venda e marcar veículo vendido |
-| `VendaEfetivada` | Política de efetivação | Efetivar venda (`Venda.efetivar`) | Venda | — (atualiza *Minhas compras*) |
-| `VeiculoVendido` | Política de efetivação | Marcar veículo vendido (`CatalogoPort.marcar_vendido`) | Veiculo | — (entra em *Veículos vendidos*) |
+| `VendaEfetivada` | Política de efetivação | Efetivar venda (`Venda.efetivar`) | Venda | Nenhuma (atualiza *Minhas compras*) |
+| `VeiculoVendido` | Política de efetivação | Marcar veículo vendido (`CatalogoPort.marcar_vendido`) | Veiculo | Nenhuma (entra em *Veículos vendidos*) |
 | `PagamentoRecusado` | Gateway de pagamento | Registrar resultado do pagamento (`RECUSADO`) | Venda | Cancelar venda e liberar veículo |
 | `VendaCancelada` | Políticas de recusa, desistência, expiração ou Gestor | Cancelar venda (`Venda.cancelar(motivo)`) | Venda | Liberar veículo |
 | `CompraCanceladaPeloComprador` | Cliente | Desistir da compra (`POST /api/v1/vendas/{id}/cancelar`) | Venda | Liberar veículo |
 | `ReservaExpirada` | Relógio (detectado de forma preguiçosa) | Cancelar venda com motivo `RESERVA_EXPIRADA` | Venda | Liberar veículo |
-| `VeiculoLiberado` | Políticas de cancelamento | Liberar veículo (`CatalogoPort.liberar`) | Veiculo | — (volta a *Veículos à venda*) |
+| `VeiculoLiberado` | Políticas de cancelamento | Liberar veículo (`CatalogoPort.liberar`) | Veiculo | Nenhuma (volta a *Veículos à venda*) |
 
 Observação: `VendaCancelada` é o evento genérico de cancelamento e sempre carrega `motivo_cancelamento`. `CompraCanceladaPeloComprador` e `ReservaExpirada` são especializações nomeadas para leitura do log; o cancelamento pela loja é registrado como `VendaCancelada` com motivo `CANCELADA_PELA_LOJA`.
 
@@ -207,7 +207,7 @@ Identificadores de domínio em português sem acento; termos técnicos podem fic
 | Identidade e Acesso | Cadastro de pessoas, login, emissão de tokens, papéis, direitos do titular | Usuários, credenciais, atributos pessoais (nome, e-mail, CPF, telefone) | Keycloak, realm `revenda`, namespace `identidade`, banco `keycloak` em instância própria; repositório próprio ([fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade)) |
 | Catálogo | Estoque e anúncio de veículos | `Veiculo` | Módulo `catalogo`, schema `catalogo` do banco `revenda` |
 | Vendas | Processo de compra, reserva, efetivação e cancelamento | `Venda` | Módulo `vendas`, schema `vendas` do banco `revenda` |
-| Gateway de Pagamento | Cobrança do comprador e notificação do resultado | — | Externo, simulado (Swagger UI / `curl`) |
+| Gateway de Pagamento | Cobrança do comprador e notificação do resultado | | Externo, simulado (Swagger UI / `curl`) |
 
 ### 2.4.3 Mapa de contextos
 
@@ -286,7 +286,7 @@ Na persistência, `reservar` é aplicado por UPDATE condicional (`... SET status
 | `status` | enum `StatusVenda` | `AGUARDANDO_PAGAMENTO`, `EFETIVADA`, `CANCELADA` |
 | `codigo_pagamento` | texto | `PAG-` + 12 hexadecimais; único |
 | `expira_em` | timestamp UTC | `criada_em + TTL` (padrão 30 min) |
-| `criada_em` | timestamp UTC | — |
+| `criada_em` | timestamp UTC | |
 | `efetivada_em` | timestamp UTC, opcional | Preenchido na efetivação |
 | `cancelada_em` | timestamp UTC, opcional | Preenchido no cancelamento |
 | `motivo_cancelamento` | enum `MotivoCancelamento`, opcional | `PAGAMENTO_RECUSADO`, `DESISTENCIA_COMPRADOR`, `CANCELADA_PELA_LOJA`, `RESERVA_EXPIRADA` |
@@ -308,7 +308,7 @@ Na persistência, `reservar` é aplicado por UPDATE condicional (`... SET status
 | `iniciar(veiculo, comprador_id, agora, ttl)` | Veículo reservado com sucesso | Cria venda com preço e descrição congelados, gera código, define `expira_em` | `CompraIniciada` |
 | `efetivar(agora)` | `AGUARDANDO_PAGAMENTO` e não expirada | `→ EFETIVADA`, `efetivada_em = agora` | `PagamentoAprovado`, `VendaEfetivada` |
 | `cancelar(motivo, agora)` | `AGUARDANDO_PAGAMENTO` | `→ CANCELADA`, `cancelada_em = agora` | `VendaCancelada` (+ `PagamentoRecusado`, `CompraCanceladaPeloComprador` ou `ReservaExpirada`, conforme o motivo) |
-| `esta_expirada(agora)` | — | Consulta: `status = AGUARDANDO_PAGAMENTO` e `agora ≥ expira_em` | — |
+| `esta_expirada(agora)` | Nenhuma | Consulta: `status = AGUARDANDO_PAGAMENTO` e `agora ≥ expira_em` | Nenhum |
 
 ### 2.5.3 Consistência entre agregados
 
@@ -368,7 +368,7 @@ O enunciado informa que "nem todos os campos e funcionalidades estão descritos"
 | RN-04 | **Reserva expira**: a venda aguardando pagamento expira após TTL configurável (padrão 30 min); ao ser detectada, a venda é cancelada com `RESERVA_EXPIRADA` e o veículo é liberado. A detecção é preguiçosa (sem agendador): `IniciarCompra` cancela a venda vencida do veículo pedido; `ProcessarPagamento` e `CancelarVenda` verificam a venda envolvida; `EditarVeiculo` e `ListarAVenda` fazem antes da consulta uma varredura limitada (até 100 vendas vencidas por chamada); as leituras `ObterVeiculo`, `ObterVenda` e as listagens de vendas também aplicam a expiração antes de responder, para nenhuma leitura mostrar reserva vencida como ativa | Impede que um comprador que desistiu sem avisar trave o veículo indefinidamente; rodar na listagem evita que um veículo com reserva vencida fique invisível para quem quer comprar |
 | RN-05 | **Gestor não compra**: usuário com papel `gestor` não pode iniciar compra (403), mesmo que também tenha papel `cliente` | Segregação de funções; evita conflito de interesse e compras internas pelo canal público |
 | RN-06 | **Cadastro antes da compra**: só usuário autenticado com papel `cliente` compra; anônimo recebe 401 | Exigência do enunciado ("pessoas cadastradas previamente") |
-| RN-07 | **Estados finais**: `VENDIDO` (veículo), `EFETIVADA` e `CANCELADA` (venda) não admitem transição | Integridade do histórico; um cancelamento não "ressuscita" uma venda — uma nova compra gera nova venda |
+| RN-07 | **Estados finais**: `VENDIDO` (veículo), `EFETIVADA` e `CANCELADA` (venda) não admitem transição | Integridade do histórico; um cancelamento não "ressuscita" uma venda; uma nova compra gera nova venda |
 | RN-08 | **Notificação idempotente**: notificação de pagamento aprovado repetida para venda já efetivada retorna 200 sem efeito; notificação de pagamento recusado para venda já cancelada também retorna 200 sem efeito. Aprovação para venda cancelada retorna 409 | Gateways reenviam notificações; repetição não pode gerar erro nem efeito duplicado |
 | RN-09 | **Pagamento recusado libera o veículo**: a venda é cancelada com `PAGAMENTO_RECUSADO` e o veículo volta a `A_VENDA` | O veículo deve voltar a ser ofertado sem intervenção manual |
 | RN-10 | **Cancelamento só antes do pagamento**: comprador (desistência) ou gestor (cancelamento pela loja) podem cancelar apenas vendas `AGUARDANDO_PAGAMENTO` (409 caso contrário) | Venda efetivada envolve dinheiro recebido; desfazer exigiria estorno, fora do escopo |

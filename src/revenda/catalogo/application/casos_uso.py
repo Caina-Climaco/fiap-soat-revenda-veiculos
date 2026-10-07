@@ -131,7 +131,7 @@ class ListarAVenda:
 
     def executar(self, *, limite: int, deslocamento: int) -> Pagina[Veiculo]:
         # Sem esta varredura, um veículo cuja reserva venceu ficaria fora da vitrine até
-        # alguém tentar comprá-lo pelo id — o que ninguém faria, já que ele não aparece.
+        # alguém tentar comprá-lo pelo id, o que ninguém faria, já que ele não aparece.
         if self._expirador is not None:
             self._expirador.expirar_vencidas(LIMITE_VARREDURA_EXPIRADAS)
         itens, total = self._repo.listar_por_status(

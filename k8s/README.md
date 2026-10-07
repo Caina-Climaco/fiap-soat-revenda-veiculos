@@ -1,4 +1,4 @@
-# k8s — manifestos da revenda-api (kustomize)
+# k8s: manifestos da revenda-api (kustomize)
 
 ```text
 k8s/
@@ -16,7 +16,7 @@ O Keycloak não é implantado aqui nem pelo Terraform deste repositório: ele ve
 | Item | Valor |
 |---|---|
 | Imagem no repositório | `revenda-api:dev` (tag neutra), `imagePullPolicy: IfNotPresent` |
-| Troca da tag | CD substitui `revenda-api:dev` por `revenda-api:<sha>` no YAML renderizado (`kubectl kustomize`), ou `kustomize edit set image revenda-api=revenda-api:<sha>` — os dois funcionam |
+| Troca da tag | CD substitui `revenda-api:dev` por `revenda-api:<sha>` no YAML renderizado (`kubectl kustomize`), ou `kustomize edit set image revenda-api=revenda-api:<sha>`; os dois funcionam |
 | Ordem | 1) `kubectl -n revenda delete job revenda-migracao --ignore-not-found`; 2) aplicar `k8s/migracao` e esperar `Complete` (`activeDeadlineSeconds: 300`); 3) aplicar `k8s/base`; 4) `kubectl -n revenda rollout status deployment/revenda-api`; 5) aplicar `k8s/saneamento` (CronJob: `apply` atualiza no lugar, sem `delete`) e disparar uma execução de fumaça com `kubectl -n revenda create job revenda-saneamento-cd-<sha> --from=cronjob/revenda-saneamento` |
 | Container | `api` no Deployment (`kubectl -n revenda set image deployment/revenda-api api=revenda-api:<sha>`); `migracao` no Job; `saneamento` no CronJob |
 | Rótulos | pods da API `app=revenda-api`; pod da migração `app=revenda-migracao`; pod do CronJob de saneamento `app=revenda-saneamento` (os três valores que a NetworkPolicy do `revenda-db` aceita). `app=revenda-api` também é o alvo da NetworkPolicy `revenda-api-somente-gateway` (Terraform) |

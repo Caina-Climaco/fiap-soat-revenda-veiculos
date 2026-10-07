@@ -1,9 +1,9 @@
-# Revenda de Veículos — API
+# Revenda de Veículos: API
 
 [![CI](https://github.com/Caina-Climaco/fiap-soat-revenda-veiculos/actions/workflows/ci.yml/badge.svg)](https://github.com/Caina-Climaco/fiap-soat-revenda-veiculos/actions/workflows/ci.yml)
 
-Trabalho Substitutivo do Tech Challenge — FIAP PósTech Software Architecture (SOAT), Fase 3.
-Autor: Cainã Clímaco — RM366473 (trabalho individual).
+Trabalho Substitutivo do Tech Challenge, FIAP PósTech Software Architecture (SOAT), Fase 3.
+Autor: Cainã Clímaco, RM366473 (trabalho individual).
 
 > **Esta entrega tem dois repositórios.** Este é o da **API** (Catálogo e Vendas). O serviço de **identidade** (Keycloak, cadastro e autorização de compradores), que o enunciado exige "totalmente apartado do resto da solução", está em **[fiap-soat-revenda-identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade)**, com código, Terraform, state, CI, CD e runner próprios ([ADR-014](docs/adrs/ADR-014-identidade-em-repositorio-proprio.md)). Para subir o ambiente, comece por ele.
 
@@ -167,7 +167,7 @@ Decisão em [ADR-001](docs/adrs/ADR-001-keycloak-identidade.md) e, sobre a separ
 
 ### 2.7 Pagamento por webhook
 
-A compra devolve um `codigo_pagamento` (`PAG-` + 12 hexadecimais). O gateway, externo e aqui simulado, notifica o resultado em `POST /api/v1/pagamentos/webhook` com `{"codigo_pagamento": "...", "status": "APROVADO" | "RECUSADO"}` e o header `X-Webhook-Secret`, comparado em tempo constante. `APROVADO` efetiva a venda e marca o veículo como vendido; `RECUSADO` cancela e libera o veículo; repetições são idempotentes; aprovação após a expiração cancela a venda e responde 409 ([ADR-007](docs/adrs/ADR-007-pagamento-webhook.md), [docs/05, seção 4.13](docs/05-api.md#413-post-apiv1pagamentoswebhook--notificação-do-gateway)).
+A compra devolve um `codigo_pagamento` (`PAG-` + 12 hexadecimais). O gateway, externo e aqui simulado, notifica o resultado em `POST /api/v1/pagamentos/webhook` com `{"codigo_pagamento": "...", "status": "APROVADO" | "RECUSADO"}` e o header `X-Webhook-Secret`, comparado em tempo constante. `APROVADO` efetiva a venda e marca o veículo como vendido; `RECUSADO` cancela e libera o veículo; repetições são idempotentes; aprovação após a expiração cancela a venda e responde 409 ([ADR-007](docs/adrs/ADR-007-pagamento-webhook.md), [docs/05, seção 4.13](docs/05-api.md#413-post-apiv1pagamentoswebhook-notificação-do-gateway)).
 
 ### 2.8 Infraestrutura
 
@@ -196,8 +196,8 @@ O **Kong 3.9.3 em modo DB-less** (namespace `gateway`) é a única entrada HTTP 
 | `api` | `/api/v1` | *Rate limiting* 600 req/min por IP |
 | `compra` | `POST /api/v1/vendas` | *Rate limiting* 60 req/min por IP |
 | `webhook-pagamento` | `POST /api/v1/pagamentos/webhook` | key-auth (`X-Webhook-Secret`) + ACL: só o consumer `gateway-pagamento`; a API valida o mesmo segredo de novo |
-| `documentacao` | `GET /docs`, `GET /openapi.json` | — |
-| `saude` | `GET /health/*` | — |
+| `documentacao` | `GET /docs`, `GET /openapi.json` | |
+| `saude` | `GET /health/*` | |
 
 Em todas as rotas: `X-Request-ID` (gerado se ausente e devolvido na resposta), payload máximo de 1 MB e métricas do gateway para o Prometheus. `/metrics` da API **não tem rota** (404 do Kong) e a Admin API do Kong não é exposta. O JWT continua validado **só na API**, pelo JWKS do Keycloak: o gateway cuida da borda, a API das regras de acesso.
 
@@ -206,7 +206,7 @@ Em todas as rotas: `X-Request-ID` (gerado se ausente e devolvido na resposta), p
 Logs JSON em stdout com `X-Request-ID` e sem dados pessoais; probes de vida e prontidão; métricas Prometheus em `GET /metrics` (latência, volume e erros por rota template, contadores de negócio); metrics-server para o HPA ([ADR-012](docs/adrs/ADR-012-observabilidade-prometheus.md)). No namespace `observabilidade` ([ADR-016](docs/adrs/ADR-016-prometheus-grafana.md)):
 
 - **Prometheus 3.14.0** (`http://localhost:9090`) coleta cada réplica da API e o Kong, por descoberta de pods restrita aos namespaces `revenda` e `gateway`, e avalia 8 regras de alerta versionadas em [`infra/observabilidade/alertas.yml`](infra/observabilidade/alertas.yml), com testes de unidade (`promtool test rules`) no CI. Sem Alertmanager: os alertas aparecem em `http://localhost:9090/alerts` e no painel.
-- **Grafana 13.2.3** (`http://localhost:3000`, leitura anônima) abre direto no painel provisionado **"Revenda de Veículos — visão geral"**: negócio (vendas iniciadas, efetivadas e canceladas, veículos cadastrados, réplicas, alertas disparando), golden signals da API e métricas do Kong (requisições por rota, barradas 401/403/429, latências).
+- **Grafana 13.2.3** (`http://localhost:3000`, leitura anônima) abre direto no painel provisionado **"Revenda de Veículos: visão geral"**: negócio (vendas iniciadas, efetivadas e canceladas, veículos cadastrados, réplicas, alertas disparando), golden signals da API e métricas do Kong (requisições por rota, barradas 401/403/429, latências).
 
 O APM (New Relic ou Datadog) e os traços distribuídos continuam como evolução documentada ([docs/12](docs/12-observabilidade.md)). Serverless também fica como evolução ([ADR-013](docs/adrs/ADR-013-sem-api-gateway-e-serverless.md)).
 
@@ -214,19 +214,19 @@ O APM (New Relic ou Datadog) e os traços distribuídos continuam como evoluçã
 
 | Documento | Conteúdo |
 |---|---|
-| [01 — Visão geral](docs/01-visao-geral.md) | Problema, escopo, atores, premissas, restrições |
-| [02 — Modelagem DDD](docs/02-modelagem-ddd.md) | Domain Storytelling, Event Storming, linguagem ubíqua, contextos, agregados, máquinas de estado, regras descobertas |
-| [03 — Requisitos](docs/03-requisitos.md) | Requisitos funcionais e não funcionais, rastreabilidade |
-| [04 — Arquitetura](docs/04-arquitetura.md) | C4 (contexto, containers, componentes), implantação, sequências, camadas |
-| [05 — API](docs/05-api.md) | Contrato dos endpoints, autenticação, erros, paginação |
-| [06 — Dados](docs/06-dados.md) | Modelo físico, índices, migrações, separação dos dados pessoais |
-| [07 — Segurança e LGPD](docs/07-seguranca-lgpd.md) | Ameaças (STRIDE), controles, OWASP, LGPD |
-| [08 — CI/CD e infraestrutura](docs/08-ci-cd-infra.md) | kind, Terraform, manifestos, pipelines, governança Git, runner, rollback |
-| [09 — Testes](docs/09-testes.md) | Estratégia, níveis, cenários BDD |
-| [10 — Plano de execução](docs/10-plano-execucao.md) | Backlog, DoR/DoD, cronograma, riscos |
-| [11 — Roteiro do vídeo](docs/11-roteiro-video.md) | Roteiro da demonstração em vídeo e checklist de preparação |
-| [12 — Observabilidade](docs/12-observabilidade.md) | Logs, métricas, Prometheus e Grafana no cluster, painel, golden signals, SLIs/SLOs, alertas ativos e APM |
-| [13 — Design Approval Sheet](docs/13-das.md) | Folha de aprovação do desenho: escopo, decisões, qualidade, riscos, custos |
+| [01. Visão geral](docs/01-visao-geral.md) | Problema, escopo, atores, premissas, restrições |
+| [02. Modelagem DDD](docs/02-modelagem-ddd.md) | Domain Storytelling, Event Storming, linguagem ubíqua, contextos, agregados, máquinas de estado, regras descobertas |
+| [03. Requisitos](docs/03-requisitos.md) | Requisitos funcionais e não funcionais, rastreabilidade |
+| [04. Arquitetura](docs/04-arquitetura.md) | C4 (contexto, containers, componentes), implantação, sequências, camadas |
+| [05. API](docs/05-api.md) | Contrato dos endpoints, autenticação, erros, paginação |
+| [06. Dados](docs/06-dados.md) | Modelo físico, índices, migrações, separação dos dados pessoais |
+| [07. Segurança e LGPD](docs/07-seguranca-lgpd.md) | Ameaças (STRIDE), controles, OWASP, LGPD |
+| [08. CI/CD e infraestrutura](docs/08-ci-cd-infra.md) | kind, Terraform, manifestos, pipelines, governança Git, runner, rollback |
+| [09. Testes](docs/09-testes.md) | Estratégia, níveis, cenários BDD |
+| [10. Plano de execução](docs/10-plano-execucao.md) | Backlog, DoR/DoD, cronograma, riscos |
+| [11. Roteiro do vídeo](docs/11-roteiro-video.md) | Roteiro da demonstração em vídeo e checklist de preparação |
+| [12. Observabilidade](docs/12-observabilidade.md) | Logs, métricas, Prometheus e Grafana no cluster, painel, golden signals, SLIs/SLOs, alertas ativos e APM |
+| [13. Design Approval Sheet](docs/13-das.md) | Folha de aprovação do desenho: escopo, decisões, qualidade, riscos, custos |
 | [infra/README.md](infra/README.md) | Detalhes da plataforma (kind, Terraform, Kong, Prometheus/Grafana, runner) |
 | [k8s/README.md](k8s/README.md) | Manifestos da aplicação e contrato com o CD |
 | [Repositório de identidade](https://github.com/Caina-Climaco/fiap-soat-revenda-identidade) | Configuração do realm (`README.md`) e contrato publicado para a API (`docs/contrato-identidade.md`) |
@@ -263,14 +263,14 @@ git clone https://github.com/Caina-Climaco/fiap-soat-revenda-veiculos.git
 
 Há duas formas de rodar. As duas publicam a API em `http://localhost:8080` e o Keycloak em `http://localhost:8180`, portanto **não rode as duas ao mesmo tempo**. Só a opção B tem o API Gateway (Kong) na frente da API e o Prometheus/Grafana; no compose, a porta 8080 é a própria API.
 
-| | Opção A — docker compose | Opção B — ambiente completo (kind) |
+| | Opção A: docker compose | Opção B: ambiente completo (kind) |
 |---|---|---|
 | Para quê | Desenvolvimento rápido | Mesmo ambiente do CD |
 | Requer | Docker | Windows, Docker Desktop, kind, Terraform, kubectl, gh |
 | Ordem | compose da identidade → compose da API | identidade (script 04 ou CD de lá) → script 04 daqui → CD da API |
 | Segredos | Você define nos dois `.env` | Gerados pelo Terraform de cada repositório, lidos com `kubectl` |
 
-### 3.1 Opção A — docker compose (desenvolvimento)
+### 3.1 Opção A: docker compose (desenvolvimento)
 
 Primeiro o serviço de identidade, no repositório dele (detalhes no `README.md` de lá):
 
@@ -310,15 +310,15 @@ TOKEN=$(curl -s http://localhost:8180/realms/revenda/protocol/openid-connect/tok
 curl -s http://localhost:8080/api/v1/vendas -H "Authorization: Bearer $TOKEN"
 ```
 
-### 3.2 Opção B — ambiente completo no Windows (igual ao CD)
+### 3.2 Opção B: ambiente completo no Windows (igual ao CD)
 
 **Pré-requisitos**: Windows 10/11, Docker Desktop (com o `kubectl` que ele instala), kind, Terraform, gh (autenticado com `gh auth login`) e git. O script 01 instala kind, Terraform e Helm via winget. Portas livres: 8080, 8180, 3000, 9090 e 15432.
 
 **Ordem para subir tudo do zero:**
 
-1. **Identidade** — no repositório de identidade, `scripts\windows\04-subir-ambiente.ps1` (ou o CD de lá): cria o cluster kind `revenda`, se faltar, e implanta o namespace `identidade` (Keycloak, banco, segredos, realm). Veja o `README.md` daquele repositório.
-2. **Infraestrutura da API** — neste repositório, `scripts\windows\04-subir-ambiente.ps1`: namespace `revenda`, segredos, `revenda-db`, metrics-server, API Gateway Kong (namespace `gateway`) e Prometheus/Grafana (namespace `observabilidade`). O script **exige** o realm respondendo em `http://localhost:8180` e falha com uma mensagem clara se a identidade não estiver no ar.
-3. **API** — pelo CD deste repositório (merge na `main` ou disparo manual).
+1. **Identidade**: no repositório de identidade, `scripts\windows\04-subir-ambiente.ps1` (ou o CD de lá): cria o cluster kind `revenda`, se faltar, e implanta o namespace `identidade` (Keycloak, banco, segredos, realm). Veja o `README.md` daquele repositório.
+2. **Infraestrutura da API**: neste repositório, `scripts\windows\04-subir-ambiente.ps1`: namespace `revenda`, segredos, `revenda-db`, metrics-server, API Gateway Kong (namespace `gateway`) e Prometheus/Grafana (namespace `observabilidade`). O script **exige** o realm respondendo em `http://localhost:8180` e falha com uma mensagem clara se a identidade não estiver no ar.
+3. **API**: pelo CD deste repositório (merge na `main` ou disparo manual).
 
 Rode os scripts na raiz deste repositório, em PowerShell normal (sem administrador), um por vez:
 
@@ -404,7 +404,7 @@ segredo observabilidade grafana-admin GF_SECURITY_ADMIN_PASSWORD
 |---|---|
 | API, pelo API Gateway (Kong) | http://localhost:8080 |
 | Swagger UI | http://localhost:8080/docs (OpenAPI em `/openapi.json`) |
-| Grafana (painel "Revenda de Veículos — visão geral") | http://localhost:3000 (leitura anônima; admin `admin` com a senha do Secret `observabilidade/grafana-admin`) |
+| Grafana (painel "Revenda de Veículos: visão geral") | http://localhost:3000 (leitura anônima; admin `admin` com a senha do Secret `observabilidade/grafana-admin`) |
 | Prometheus (consultas e alertas) | http://localhost:9090 (alertas em http://localhost:9090/alerts) |
 | Keycloak (repositório de identidade) | http://localhost:8180 |
 | Conta do cliente (dados do titular) | http://localhost:8180/realms/revenda/account |
@@ -507,7 +507,7 @@ uv sync --frozen        # dependências da aplicação e de desenvolvimento, pel
 
 ### 4.1 Unidade e integração
 
-Os testes de unidade não usam banco nem rede. Os de integração precisam de um PostgreSQL real, indicado por `TEST_DATABASE_URL`; sem a variável, eles são pulados com aviso. O docker compose cria o banco `revenda_test` na primeira subida do serviço `postgres` (requer o `.env` da [opção A](#31-opção-a--docker-compose-desenvolvimento)):
+Os testes de unidade não usam banco nem rede. Os de integração precisam de um PostgreSQL real, indicado por `TEST_DATABASE_URL`; sem a variável, eles são pulados com aviso. O docker compose cria o banco `revenda_test` na primeira subida do serviço `postgres` (requer o `.env` da [opção A](#31-opção-a-docker-compose-desenvolvimento)):
 
 ```bash
 docker compose up -d postgres
@@ -560,7 +560,7 @@ export E2E_KC_CLIENT_SECRET="$(segredo identidade keycloak-e2e E2E_ADMIN_CLIENT_
 uv run pytest tests/e2e -m e2e -p no:cacheprovider -o addopts="" -v
 ```
 
-PowerShell (com a função `Segredo` da [seção 3.2](#32-opção-b--ambiente-completo-no-windows-igual-ao-cd)):
+PowerShell (com a função `Segredo` da [seção 3.2](#32-opção-b-ambiente-completo-no-windows-igual-ao-cd)):
 
 ```powershell
 $env:E2E_GESTOR_PASSWORD   = Segredo identidade keycloak-gestor GESTOR_PASSWORD
@@ -675,7 +675,7 @@ Até esta mudança ([ADR-014](docs/adrs/ADR-014-identidade-em-repositorio-propri
 4. Suba a API: `scripts\windows\04-subir-ambiente.ps1` neste repositório e depois o CD.
 5. Instale o runner da identidade (`scripts\windows\03-instalar-runner.ps1` no repositório de identidade, container `revenda-runner-identidade`). O runner deste repositório (`revenda-runner`) continua o mesmo.
 
-No modo docker compose, rode `docker compose down -v --remove-orphans` neste repositório (o `--remove-orphans` remove os containers do Keycloak e do banco dele que ficaram do compose anterior) e `docker volume rm revenda_keycloak-db` (volume antigo, que o compose atual não declara mais), apague do `.env` as variáveis `KC_*` e `GESTOR_PASSWORD` (agora no `.env` do repositório de identidade) e siga a [seção 3.1](#31-opção-a--docker-compose-desenvolvimento).
+No modo docker compose, rode `docker compose down -v --remove-orphans` neste repositório (o `--remove-orphans` remove os containers do Keycloak e do banco dele que ficaram do compose anterior) e `docker volume rm revenda_keycloak-db` (volume antigo, que o compose atual não declara mais), apague do `.env` as variáveis `KC_*` e `GESTOR_PASSWORD` (agora no `.env` do repositório de identidade) e siga a [seção 3.1](#31-opção-a-docker-compose-desenvolvimento).
 
 ## 9. Migração para o API Gateway e o monitoramento
 
@@ -692,5 +692,5 @@ A porta 8080 não muda, mas agora é o Kong: `http://localhost:8080/metrics` pas
 
 ## 10. Autor
 
-**Cainã Clímaco** (RM366473) — FIAP PósTech Software Architecture (SOAT), Trabalho Substitutivo do Tech Challenge, Fase 3.
+**Cainã Clímaco** (RM366473), FIAP PósTech Software Architecture (SOAT), Trabalho Substitutivo do Tech Challenge, Fase 3.
 Repositório: https://github.com/Caina-Climaco/fiap-soat-revenda-veiculos

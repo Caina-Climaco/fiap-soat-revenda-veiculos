@@ -21,10 +21,10 @@ Métricas expostas em `/metrics`:
 |---|---|---|
 | `revenda_http_requisicoes_total` | contador | `metodo`, `rota`, `status` |
 | `revenda_http_requisicao_duracao_segundos` | histograma | `metodo`, `rota`, `status` |
-| `revenda_vendas_iniciadas_total` | contador | — |
-| `revenda_vendas_efetivadas_total` | contador | — |
+| `revenda_vendas_iniciadas_total` | contador | nenhum |
+| `revenda_vendas_efetivadas_total` | contador | nenhum |
 | `revenda_vendas_canceladas_total` | contador | `motivo` |
-| `revenda_veiculos_cadastrados_total` | contador | — |
+| `revenda_veiculos_cadastrados_total` | contador | nenhum |
 
 O rótulo `rota` é o template da rota (ex.: `/api/v1/vendas/{venda_id}`), nunca o caminho com o UUID; caminhos que não correspondem a nenhuma rota (404) usam o valor fixo `nao_mapeada`. A cardinalidade fica limitada ao número de rotas. Além das séries da aplicação, o endpoint traz as métricas padrão do processo Python (`process_*`, `python_*`: CPU, memória, descritores de arquivo, coleta de lixo). Os contadores de negócio são alimentados pelos eventos de domínio publicados **depois do commit**, então só contam fatos confirmados. Nenhuma métrica carrega `sub`, identificador de venda ou de veículo.
 
@@ -36,10 +36,10 @@ Implantado pelo Terraform deste repositório (`infra/terraform/observabilidade.t
 |---|---|---|
 | **Prometheus** 3.14.0 | `infra/observabilidade/prometheus.yml`: *scrape* a cada 15 s; jobs `prometheus`, `revenda-api` (descoberta de pods no ns `revenda`, uma série por réplica, pelas anotações `prometheus.io/*`) e `kong` (pods do ns `gateway`, porta 8100). Permissão: Roles de leitura de pods só em `revenda` e `gateway`. Regras em `alertas.yml`. Retenção de 2 dias em `emptyDir` (os dados somem quando o pod reinicia) | http://localhost:9090 (NodePort 30900); alertas em http://localhost:9090/alerts |
 | **Grafana** 13.2.3 | Fonte de dados `Prometheus` (uid `prometheus`) e painel provisionados por arquivo (`infra/observabilidade/grafana/`), pasta "Revenda"; o painel é a página inicial e não pode ser alterado pela interface. Acesso anônimo como Viewer; admin `admin` com senha aleatória no Secret `observabilidade/grafana-admin` | http://localhost:3000 (NodePort 30300) |
-| **Alertmanager** | Não instalado: os alertas não notificam ninguém, aparecem no Prometheus e no painel | — |
-| **APM** | Não instalado (evolução, seção 12.6) | — |
+| **Alertmanager** | Não instalado: os alertas não notificam ninguém, aparecem no Prometheus e no painel | |
+| **APM** | Não instalado (evolução, seção 12.6) | |
 
-**Painel "Revenda de Veículos — visão geral"** (uid `revenda-visao-geral`, `infra/observabilidade/grafana/painel-revenda.json`):
+**Painel "Revenda de Veículos: visão geral"** (uid `revenda-visao-geral`, `infra/observabilidade/grafana/painel-revenda.json`):
 
 | Linha | Painéis |
 |---|---|
@@ -99,7 +99,7 @@ As regras **ativas** estão em `infra/observabilidade/alertas.yml`, em três gru
 | `RevendaApiFora` | `up{job="revenda-api"} == 0 or absent(up{job="revenda-api"})` (alvo sem scrape) | 2 min | crítica | Ver pods, eventos e `rollout status` |
 | `RevendaErros5xxAltos` | Taxa de 5xx da seção 12.2 `> 0.01` | 5 min | crítica | Logs `nivel=ERROR` por `request_id`; rollback se coincidir com deploy |
 | `RevendaListagensLentas` | p95 das listagens `> 0.3` s | 10 min | alerta | Ver saturação (CPU, HPA no máximo) e o banco |
-| `RevendaOrcamentoQueimandoRapido` (*proposta*) | Consumo do orçamento de erro de disponibilidade 14 vezes acima do sustentável em 1 h e em 5 min (*burn rate* multijanela) | — | crítica | Tratar como incidente |
+| `RevendaOrcamentoQueimandoRapido` (*proposta*) | Consumo do orçamento de erro de disponibilidade 14 vezes acima do sustentável em 1 h e em 5 min (*burn rate* multijanela) | n/a | crítica | Tratar como incidente |
 | `RevendaHpaNoMaximo` | `count(up{job="revenda-api"} == 1) >= 5` (réplicas coletadas no máximo do HPA) | 15 min | alerta | Avaliar `maxReplicas`, *requests* e consultas lentas |
 | `RevendaWebhookRecusado` | `sum(rate(revenda_http_requisicoes_total{rota="/api/v1/pagamentos/webhook",status="401"}[5m])) > 0.1` | 5 min | alerta | Possível tentativa de forjar pagamento; conferir origem e rotacionar o segredo |
 | `RevendaRecusasDePagamentoAltas` | `sum(increase(revenda_vendas_canceladas_total{motivo="PAGAMENTO_RECUSADO"}[1h])) / clamp_min(sum(increase(revenda_vendas_iniciadas_total[1h])), 1) > 0.3` | 30 min | informativa | Falar com o gateway de pagamento |
@@ -117,7 +117,7 @@ No ambiente kind (opção B do README):
 
 | O quê | Onde |
 |---|---|
-| Painel | http://localhost:3000 (abre direto em "Revenda de Veículos — visão geral"; leitura anônima) |
+| Painel | http://localhost:3000 (abre direto em "Revenda de Veículos: visão geral"; leitura anônima) |
 | Consultas PromQL | http://localhost:9090/query, com as consultas da seção 12.2 |
 | Alvos coletados | http://localhost:9090/targets (jobs `revenda-api`, uma linha por réplica, e `kong`) |
 | Alertas | http://localhost:9090/alerts |

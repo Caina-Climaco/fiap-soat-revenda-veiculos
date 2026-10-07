@@ -84,7 +84,7 @@ def criar_app(
     dep_catalogo, dep_vendas = composicao.dependencias()
 
     app = FastAPI(
-        title="Revenda de Veículos — API",
+        title="Revenda de Veículos: API",
         version=__version__,
         description=DESCRICAO,
         openapi_tags=TAGS,

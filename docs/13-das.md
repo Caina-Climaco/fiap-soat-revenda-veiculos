@@ -6,7 +6,7 @@ Folha de aprovação do desenho da solução: resume o que será entregue, as de
 
 | Campo | Valor |
 |---|---|
-| Projeto | Revenda de Veículos — API (`fiap-soat-revenda-veiculos`) |
+| Projeto | Revenda de Veículos: API (`fiap-soat-revenda-veiculos`) |
 | Contexto | Trabalho Substitutivo do Tech Challenge, FIAP PósTech Software Architecture (SOAT), Fase 3 |
 | Versão do desenho | 1.1 (API Gateway e monitoramento, 05/10/2026) |
 | Autor (proponente) | Cainã Clímaco |
@@ -104,7 +104,7 @@ Lista completa em [10-plano-execucao.md, seção 10.5](10-plano-execucao.md#105-
 | Papel | Nome | Data | Parecer |
 |---|---|---|---|
 | Proponente (autor) | Cainã Clímaco | 05/10/2026 | Submetido para aprovação (versão 1.1) |
-| Arquiteto revisor | — | — | Não se aplica: trabalho individual; os papéis de revisão foram exercidos pelo próprio autor com apoio das verificações automáticas do CI |
-| Segurança e privacidade (LGPD) | — | — | Não se aplica (idem); análise em [07-seguranca-lgpd.md](07-seguranca-lgpd.md) |
-| Operações / plataforma | — | — | Não se aplica (idem); o CD verde na `main` é a evidência operacional |
+| Arquiteto revisor | | | Não se aplica: trabalho individual; os papéis de revisão foram exercidos pelo próprio autor com apoio das verificações automáticas do CI |
+| Segurança e privacidade (LGPD) | | | Não se aplica (idem); análise em [07-seguranca-lgpd.md](07-seguranca-lgpd.md) |
+| Operações / plataforma | | | Não se aplica (idem); o CD verde na `main` é a evidência operacional |
 | Avaliador (FIAP) | | | Reservado para o parecer da avaliação |

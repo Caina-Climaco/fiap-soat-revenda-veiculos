@@ -8,10 +8,10 @@
 
 ## Tipo
 
-- [ ] feat — funcionalidade
-- [ ] fix — correção
-- [ ] infra — Terraform, manifestos, pipelines
-- [ ] docs — documentação
+- [ ] feat: funcionalidade
+- [ ] fix: correção
+- [ ] infra: Terraform, manifestos, pipelines
+- [ ] docs: documentação
 - [ ] test / refactor / chore
 
 ## Checklist
